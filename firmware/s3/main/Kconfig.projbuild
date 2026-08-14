@@ -31,6 +31,18 @@ config OBU_OTM_DIRECT_ENABLE
     bool "Enable direct OpenTrafficMap Wi-Fi uploader"
     default n
 
+config OBU_OTM_TLS_TRACE
+    bool "Enable verbose OpenTrafficMap TLS handshake tracing"
+    depends on OBU_OTM_DIRECT_ENABLE
+    default y
+    select MBEDTLS_DEBUG
+    help
+        Enable ESP-IDF/mbedTLS internal TLS handshake tracing while diagnosing
+        OpenTrafficMap broker connection failures. ESP-TLS automatically hooks
+        the mbedTLS debug callback when MBEDTLS_DEBUG is selected. This is noisy
+        development instrumentation and should be disabled after the broker
+        connection problem has been resolved.
+
 config OBU_WIFI_SSID
     string "Development Wi-Fi SSID"
     default ""
