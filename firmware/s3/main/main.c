@@ -39,15 +39,19 @@ static uint32_t ipc_seq;
 static QueueHandle_t pps_queue;
 static QueueHandle_t event_queue;
 
-/*
- * IPC messages and bus events contain ~2.5 KiB payload arrays. Keep the
- * long-lived task scratch objects in static storage instead of placing them
- * on the comparatively small FreeRTOS task stacks.
- */
 static obu_ipc_message_t main_ipc_rx;
 static obu_ipc_message_t time_probe_message;
 static obu_event_t main_event_scratch;
 static obu_event_t event_consumer_scratch;
+
+static uint64_t c5_last_message_us;
+static uint64_t c5_last_link_report_us;
+static uint32_t c5_message_count;
+static uint32_t c5_status_count;
+static uint32_t c5_time_response_count;
+static uint32_t c5_rx_frame_count;
+static uint32_t c5_last_boot_nonce;
+static bool c5_link_online;
 
 typedef struct __attribute__((packed)) {
     obu_v2x_rx_meta_t meta;
@@ -66,6 +70,23 @@ static c5_clock_relation_t c5_clock = {
     .lock = portMUX_INITIALIZER_UNLOCKED,
 };
 
+static const char *ipc_type_name(obu_ipc_type_t type)
+{
+    switch (type) {
+        case OBU_IPC_NOP: return "NOP";
+        case OBU_IPC_RX_FRAME: return "RX_FRAME";
+        case OBU_IPC_RADIO_STATUS: return "RADIO_STATUS";
+        case OBU_IPC_TX_REQUEST: return "TX_REQUEST";
+        case OBU_IPC_TX_RESULT: return "TX_RESULT";
+        case OBU_IPC_SET_RADIO: return "SET_RADIO";
+        case OBU_IPC_ARM_TX: return "ARM_TX";
+        case OBU_IPC_TIME_PROBE: return "TIME_PROBE";
+        case OBU_IPC_TIME_RESPONSE: return "TIME_RESPONSE";
+        case OBU_IPC_ACK: return "ACK";
+        default: return "UNKNOWN";
+    }
+}
+
 static uint64_t c5_to_s3_monotonic(uint64_t c5_us)
 {
     portENTER_CRITICAL(&c5_clock.lock);
@@ -81,7 +102,10 @@ static void update_clock_relation(uint64_t t1_s3, uint64_t t2_c5, uint64_t t3_c5
 {
     if (t4_s3 < t1_s3 || t3_c5 < t2_c5) return;
     const uint64_t rtt = (t4_s3 - t1_s3) - (t3_c5 - t2_c5);
-    if (rtt > 20000) return;
+    if (rtt > 20000) {
+        ESP_LOGW(TAG, "C5 clock sample rejected: RTT=%llu us exceeds 20 ms", (unsigned long long)rtt);
+        return;
+    }
     const int64_t sample = ((int64_t)t1_s3 - (int64_t)t2_c5 +
                             (int64_t)t4_s3 - (int64_t)t3_c5) / 2;
     portENTER_CRITICAL(&c5_clock.lock);
@@ -134,15 +158,50 @@ static void publish_clock_status(void)
     (void)obu_bus_publish(&bus, e);
 }
 
+static void mark_c5_message(const obu_ipc_message_t *m)
+{
+    const uint64_t now = obu_monotonic_us();
+    c5_last_message_us = now;
+    c5_message_count++;
+    if (!c5_link_online) {
+        c5_link_online = true;
+        ESP_LOGI(TAG, "C5 application IPC active: first/resumed message type=%s(%u) seq=%u",
+                 ipc_type_name(m->type), (unsigned)m->type, (unsigned)m->sequence);
+    }
+    ESP_LOGD(TAG, "C5 IPC RX type=%s(%u) seq=%u payload=%u",
+             ipc_type_name(m->type), (unsigned)m->type, (unsigned)m->sequence, (unsigned)m->payload_len);
+}
+
 static void ingest_ipc(const obu_ipc_message_t *m)
 {
+    mark_c5_message(m);
+
     if (m->type == OBU_IPC_RX_FRAME && m->payload_len >= sizeof(rx_wire_t)) {
         rx_wire_t w;
         memcpy(&w, m->payload, sizeof(w));
-        if (sizeof(w) + w.frame_len > m->payload_len) return;
+        if (sizeof(w) + w.frame_len > m->payload_len) {
+            ESP_LOGW(TAG, "C5 RX_FRAME malformed: frame_len=%u payload_len=%u",
+                     (unsigned)w.frame_len, (unsigned)m->payload_len);
+            return;
+        }
 
         size_t total = sizeof(w.meta) + w.frame_len;
-        if (total > OBU_EVENT_PAYLOAD_MAX) return;
+        if (total > OBU_EVENT_PAYLOAD_MAX) {
+            ESP_LOGW(TAG, "C5 RX_FRAME too large for event bus: %u bytes", (unsigned)total);
+            return;
+        }
+
+        c5_rx_frame_count++;
+        if (c5_rx_frame_count == 1u || (c5_rx_frame_count % 100u) == 0u) {
+            ESP_LOGI(TAG,
+                     "C5 V2X RX #%u: c5_seq=%u len=%u freq=%uMHz rssi=%ddBm hw_ts=%llu us",
+                     (unsigned)c5_rx_frame_count,
+                     (unsigned)w.meta.c5_sequence,
+                     (unsigned)w.frame_len,
+                     (unsigned)w.meta.frequency_mhz,
+                     (int)w.meta.rssi_dbm,
+                     (unsigned long long)w.meta.radio_hw_timestamp_us);
+        }
 
         obu_event_t *e = prepare_main_event();
         e->source = OBU_SOURCE_C5_RADIO;
@@ -161,7 +220,29 @@ static void ingest_ipc(const obu_ipc_message_t *m)
     } else if (m->type == OBU_IPC_RADIO_STATUS && m->payload_len >= sizeof(obu_radio_status_t)) {
         obu_radio_status_t s;
         memcpy(&s, m->payload, sizeof(s));
+        const bool state_changed = c5_status_count == 0u || c5_last_boot_nonce != s.boot_nonce || hmi.c5_online != s.radio_running;
+        c5_status_count++;
+        c5_last_boot_nonce = s.boot_nonce;
         hmi.c5_online = s.radio_running;
+
+        if (state_changed || (c5_status_count % 5u) == 0u) {
+            ESP_LOGI(TAG,
+                     "C5 status #%u: radio=%s tx_armed=%s freq=%uMHz fw=%s boot_nonce=%u rx=%u drop_buf=%u drop_size=%u ipc_drop=%u tx=%u/%u failed=%u reset=%u",
+                     (unsigned)c5_status_count,
+                     s.radio_running ? "ON" : "OFF",
+                     s.tx_armed ? "YES" : "NO",
+                     (unsigned)s.frequency_mhz,
+                     s.firmware_version,
+                     (unsigned)s.boot_nonce,
+                     (unsigned)s.rx_frames,
+                     (unsigned)s.rx_drop_no_buffer,
+                     (unsigned)s.rx_drop_oversize,
+                     (unsigned)s.ipc_drop,
+                     (unsigned)s.tx_success,
+                     (unsigned)s.tx_requests,
+                     (unsigned)s.tx_failed,
+                     (unsigned)s.reset_reason);
+        }
 
         obu_event_t *e = prepare_main_event();
         e->source = OBU_SOURCE_C5_RADIO;
@@ -175,6 +256,7 @@ static void ingest_ipc(const obu_ipc_message_t *m)
         stamp_event_utc(e);
         (void)obu_bus_publish(&bus, e);
     } else if (m->type == OBU_IPC_TX_RESULT) {
+        ESP_LOGI(TAG, "C5 TX result received: seq=%u payload=%u", (unsigned)m->sequence, (unsigned)m->payload_len);
         obu_event_t *e = prepare_main_event();
         e->source = OBU_SOURCE_C5_RADIO;
         e->type = OBU_DATA_V2X_TX_RESULT;
@@ -192,7 +274,55 @@ static void ingest_ipc(const obu_ipc_message_t *m)
         memcpy(&t2, m->payload + 8, 8);
         memcpy(&t3, m->payload + 16, 8);
         update_clock_relation(t1, t2, t3, obu_monotonic_us());
+        c5_time_response_count++;
+        if (c5_time_response_count == 1u || (c5_time_response_count % 5u) == 0u) {
+            int64_t offset;
+            uint32_t rtt;
+            uint32_t samples;
+            portENTER_CRITICAL(&c5_clock.lock);
+            offset = c5_clock.c5_to_s3_offset_us;
+            rtt = c5_clock.last_rtt_us;
+            samples = c5_clock.samples;
+            portEXIT_CRITICAL(&c5_clock.lock);
+            ESP_LOGI(TAG, "C5 clock sync: responses=%u samples=%u RTT=%uus offset=%lldus",
+                     (unsigned)c5_time_response_count, (unsigned)samples, (unsigned)rtt, (long long)offset);
+        }
         publish_clock_status();
+    } else {
+        ESP_LOGW(TAG, "Unhandled C5 IPC message type=%s(%u) payload=%u",
+                 ipc_type_name(m->type), (unsigned)m->type, (unsigned)m->payload_len);
+    }
+}
+
+static void monitor_c5_link(void)
+{
+    const uint64_t now = obu_monotonic_us();
+    if (c5_last_message_us == 0) {
+        if (now > 3000000ULL && (c5_last_link_report_us == 0 || now - c5_last_link_report_us >= 5000000ULL)) {
+            c5_last_link_report_us = now;
+            ESP_LOGW(TAG,
+                     "No application message from C5 yet. Check power/GND and SPI wiring: S3 GPIO7(SCLK)->C5 GPIO8, GPIO9(MOSI)->C5 GPIO10, GPIO8(MISO)<-C5 GPIO9, GPIO1(CS)->C5 GPIO1");
+        }
+        return;
+    }
+
+    const uint64_t age_us = now - c5_last_message_us;
+    if (age_us > 3000000ULL && c5_link_online) {
+        c5_link_online = false;
+        hmi.c5_online = false;
+        ESP_LOGW(TAG, "C5 application IPC timeout: no message for %llu ms",
+                 (unsigned long long)(age_us / 1000ULL));
+    }
+
+    if (now - c5_last_link_report_us >= 10000000ULL) {
+        c5_last_link_report_us = now;
+        ESP_LOGI(TAG, "C5 application link: %s messages=%u status=%u time_rsp=%u v2x_frames=%u last_age=%llu ms",
+                 c5_link_online ? "ACTIVE" : "STALE",
+                 (unsigned)c5_message_count,
+                 (unsigned)c5_status_count,
+                 (unsigned)c5_time_response_count,
+                 (unsigned)c5_rx_frame_count,
+                 (unsigned long long)(age_us / 1000ULL));
     }
 }
 
@@ -224,19 +354,14 @@ static void process_warning(const obu_event_t *e)
     };
     snprintf(warning.text, sizeof(warning.text), "V2X WARNING");
 
-    if (e->payload_len >= sizeof(warning)) {
-        memcpy(&warning, e->payload, sizeof(warning));
-    }
+    if (e->payload_len >= sizeof(warning)) memcpy(&warning, e->payload, sizeof(warning));
 
     hmi.warning = warning.kind == OBU_WARNING_KIND_SYSTEM ? OBU_HMI_WARN_SYSTEM : OBU_HMI_WARN_DENM;
-    snprintf(hmi.warning_text, sizeof(hmi.warning_text), "%s",
-             warning.text[0] ? warning.text : "V2X WARNING");
+    snprintf(hmi.warning_text, sizeof(hmi.warning_text), "%s", warning.text[0] ? warning.text : "V2X WARNING");
 
     if (warning_output_ready) {
         esp_err_t err = obu_warning_controller_handle(&warning_controller, &warning);
-        if (err != ESP_OK && err != ESP_ERR_TIMEOUT) {
-            ESP_LOGW(TAG, "warning output failed: %s", esp_err_to_name(err));
-        }
+        if (err != ESP_OK && err != ESP_ERR_TIMEOUT) ESP_LOGW(TAG, "warning output failed: %s", esp_err_to_name(err));
     }
 }
 
@@ -252,9 +377,7 @@ static void event_consumer(void *arg)
                        e->type == OBU_DATA_V2X_TX_RESULT || e->type == OBU_DATA_CLOCK_SYNC || !(e->flags & OBU_EVENT_F_VALID))) {
             (void)obu_diag_log_event(logger, e, "event");
         }
-        if (e->type == OBU_DATA_WARNING) {
-            process_warning(e);
-        }
+        if (e->type == OBU_DATA_WARNING) process_warning(e);
     }
 }
 
@@ -262,9 +385,7 @@ static void hmi_task(void *arg)
 {
     (void)arg;
     for (;;) {
-        if (display.ops != NULL && display.ops->render != NULL) {
-            (void)display.ops->render(&display, &hmi);
-        }
+        if (display.ops != NULL && display.ops->render != NULL) (void)display.ops->render(&display, &hmi);
         vTaskDelay(pdMS_TO_TICKS(200));
     }
 }
@@ -279,7 +400,8 @@ static void time_probe_task(void *arg)
         time_probe_message.source_monotonic_us = obu_monotonic_us();
         time_probe_message.payload_len = 8;
         memcpy(time_probe_message.payload, &time_probe_message.source_monotonic_us, 8);
-        (void)obu_ipc_send(ipc, &time_probe_message, pdMS_TO_TICKS(5));
+        const esp_err_t err = obu_ipc_send(ipc, &time_probe_message, pdMS_TO_TICKS(5));
+        if (err != ESP_OK) ESP_LOGW(TAG, "Failed to queue C5 time probe: %s", esp_err_to_name(err));
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
@@ -356,9 +478,7 @@ void app_main(void)
     ESP_ERROR_CHECK(obu_time_init(&timesvc, i2c));
 
     esp_err_t display_err = obu_ssd1306_create(i2c, 0x3c, &display);
-    if (display_err != ESP_OK) {
-        ESP_LOGW(TAG, "OLED unavailable; acquisition continues: %s", esp_err_to_name(display_err));
-    }
+    if (display_err != ESP_OK) ESP_LOGW(TAG, "OLED unavailable; acquisition continues: %s", esp_err_to_name(display_err));
     hmi.phone_connected = false;
 
 #ifdef CONFIG_OBU_BUZZER_ENABLE
@@ -376,8 +496,7 @@ void app_main(void)
 #endif
         warning_output_ready = true;
     } else {
-        ESP_LOGW(TAG, "local warning buzzer unavailable; acquisition continues: %s",
-                 esp_err_to_name(buzzer_err));
+        ESP_LOGW(TAG, "local warning buzzer unavailable; acquisition continues: %s", esp_err_to_name(buzzer_err));
     }
 #endif
 
@@ -402,6 +521,8 @@ void app_main(void)
         .clock_hz = 8000000,
         .bus_already_initialized = true,
     };
+    ESP_LOGI(TAG,
+             "C5 SPI wiring expected: S3 GPIO7 SCLK -> C5 GPIO8; S3 GPIO9 MOSI -> C5 GPIO10; S3 GPIO8 MISO <- C5 GPIO9; S3 GPIO1 CS -> C5 GPIO1; common GND; 8MHz mode0");
     ESP_ERROR_CHECK(obu_ipc_init(&ic, &ipc));
 
     event_queue = xQueueCreate(8, sizeof(obu_event_t));
@@ -449,18 +570,8 @@ void app_main(void)
     if (display.ops != NULL && xTaskCreate(hmi_task, "hmi", 4096, NULL, 5, NULL) != pdPASS) abort();
     if (xTaskCreate(time_probe_task, "c5_clock", 3072, NULL, 8, NULL) != pdPASS) abort();
 
-    ESP_LOGI(TAG, "main minimum free stack after startup: %u bytes",
-             (unsigned)uxTaskGetStackHighWaterMark(NULL));
-
-    uint32_t stack_report_counter = 0;
     for (;;) {
-        if (obu_ipc_receive(ipc, &main_ipc_rx, pdMS_TO_TICKS(250)) == ESP_OK) {
-            ingest_ipc(&main_ipc_rx);
-        }
-        if (++stack_report_counter >= 20u) {
-            stack_report_counter = 0;
-            ESP_LOGI(TAG, "main minimum free stack: %u bytes",
-                     (unsigned)uxTaskGetStackHighWaterMark(NULL));
-        }
+        if (obu_ipc_receive(ipc, &main_ipc_rx, pdMS_TO_TICKS(250)) == ESP_OK) ingest_ipc(&main_ipc_rx);
+        monitor_c5_link();
     }
 }
