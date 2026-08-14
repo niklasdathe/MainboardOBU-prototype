@@ -1,0 +1,8 @@
+# Seeed Studio XIAO ESP32-S3 prototype hardware: 8 MB flash.
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+
+# The S3 hub links Wi-Fi/MQTT TLS, FAT/SD, GNSS/time, HMI and warning drivers.
+# ESP-IDF's default 1 MiB factory partition is too small. Use the standard
+# 1.5 MiB single-app development layout; OTA is intentionally not implemented
+# in this prototype firmware yet.
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
