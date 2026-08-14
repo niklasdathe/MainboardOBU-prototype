@@ -30,8 +30,10 @@ struct obu_otm {
     uint32_t errors;
     uint32_t wifi_connect_attempts;
     uint32_t wifi_disconnects;
+    uint32_t mqtt_attempts;
     uint32_t mqtt_connects;
     uint32_t mqtt_errors;
+    uint32_t mqtt_network_restarts;
 };
 
 static void log_wifi_link(void)
@@ -76,12 +78,15 @@ static void log_mqtt_error(esp_mqtt_event_handle_t event, struct obu_otm *o)
         ESP_LOGE(TAG, "MQTT error #%u: error_type=%u",
                  (unsigned)o->mqtt_errors, (unsigned)err->error_type);
     }
-    ESP_LOGI(TAG, "MQTT diagnostic context: broker=%s wifi_ready=%s mqtt_started=%s connects=%u disconnects=%u",
+    ESP_LOGI(TAG,
+             "MQTT diagnostic context: broker=%s wifi_ready=%s mqtt_started=%s attempts=%u connects=%u wifi_disconnects=%u network_restarts=%u",
              o->broker_uri,
              o->wifi_ready ? "yes" : "no",
              o->mqtt_started ? "yes" : "no",
+             (unsigned)o->mqtt_attempts,
              (unsigned)o->mqtt_connects,
-             (unsigned)o->wifi_disconnects);
+             (unsigned)o->wifi_disconnects,
+             (unsigned)o->mqtt_network_restarts);
     log_wifi_link();
 }
 
@@ -93,16 +98,23 @@ static void mqtt_evt(void *arg, esp_event_base_t base, int32_t id, void *data)
     esp_mqtt_event_handle_t event = (esp_mqtt_event_handle_t)data;
 
     if (id == MQTT_EVENT_BEFORE_CONNECT) {
-        ESP_LOGI(TAG, "OpenTrafficMap MQTT attempting connection to %s", o->broker_uri);
+        o->mqtt_attempts++;
+        ESP_LOGI(TAG, "OpenTrafficMap MQTT attempting connection #%u to %s",
+                 (unsigned)o->mqtt_attempts, o->broker_uri);
     } else if (id == MQTT_EVENT_CONNECTED) {
         o->mqtt_ready = true;
         o->mqtt_connects++;
-        ESP_LOGI(TAG, "OpenTrafficMap MQTT connected (connection #%u)", (unsigned)o->mqtt_connects);
+        ESP_LOGI(TAG, "OpenTrafficMap MQTT connected (connection #%u after %u attempts)",
+                 (unsigned)o->mqtt_connects, (unsigned)o->mqtt_attempts);
         const int msg_id = esp_mqtt_client_publish(o->mqtt, o->status, "online", 0, 0, 1);
         ESP_LOGI(TAG, "Published OTM online status: topic=%s msg_id=%d", o->status, msg_id);
     } else if (id == MQTT_EVENT_DISCONNECTED) {
         o->mqtt_ready = false;
-        ESP_LOGW(TAG, "OpenTrafficMap MQTT disconnected; client will retry while Wi-Fi remains available");
+        if (o->wifi_ready && o->mqtt_started) {
+            ESP_LOGW(TAG, "OpenTrafficMap MQTT disconnected; client will retry while Wi-Fi remains available");
+        } else {
+            ESP_LOGI(TAG, "OpenTrafficMap MQTT disconnected because network/client is stopping");
+        }
     } else if (id == MQTT_EVENT_ERROR) {
         o->mqtt_ready = false;
         log_mqtt_error(event, o);
@@ -111,6 +123,25 @@ static void mqtt_evt(void *arg, esp_event_base_t base, int32_t id, void *data)
     } else {
         ESP_LOGD(TAG, "MQTT event id=%ld", (long)id);
     }
+}
+
+static void stop_mqtt_for_network_loss(struct obu_otm *o)
+{
+    if (o == NULL || o->mqtt == NULL || !o->mqtt_started) return;
+
+    /* This function is called from the Wi-Fi event handler, not from an MQTT
+     * callback. Stop the MQTT task/socket explicitly so the next DHCP lease
+     * starts from a fresh TCP/TLS state, matching the OpenTrafficMap receiver
+     * lifecycle of MQTT-up on GOT_IP and MQTT-down on network loss. */
+    ESP_LOGI(TAG, "Stopping OpenTrafficMap MQTT because Wi-Fi/IP is unavailable");
+    const esp_err_t err = esp_mqtt_client_stop(o->mqtt);
+    if (err == ESP_OK) {
+        o->mqtt_network_restarts++;
+    } else {
+        ESP_LOGW(TAG, "Stopping OpenTrafficMap MQTT returned %s", esp_err_to_name(err));
+    }
+    o->mqtt_started = false;
+    o->mqtt_ready = false;
 }
 
 static void start_mqtt_after_ip(struct obu_otm *o)
@@ -143,8 +174,9 @@ static void wifi_evt(void *arg, esp_event_base_t base, int32_t id, void *data)
         log_wifi_link();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         o->wifi_ready = false;
-        o->mqtt_ready = false;
         o->wifi_disconnects++;
+        stop_mqtt_for_network_loss(o);
+
         const wifi_event_sta_disconnected_t *disc = (const wifi_event_sta_disconnected_t *)data;
         if (disc != NULL) {
             ESP_LOGW(TAG, "Wi-Fi disconnected #%u: reason=%u RSSI=%d; reconnecting",
@@ -194,11 +226,14 @@ esp_err_t obu_otm_wifi_start(const obu_otm_wifi_config_t *c, obu_otm_t **out)
     snprintf(o->topic, sizeof(o->topic), "its/%s/packet", c->node_id);
     snprintf(o->status, sizeof(o->status), "its/%s/status", c->node_id);
     snprintf(o->broker_uri, sizeof(o->broker_uri), "%s",
-             c->broker_uri != NULL ? c->broker_uri : "mqtts://cits1.opentrafficmap.org:8883");
+             c->broker_uri != NULL ? c->broker_uri : "mqtts://cits1.opentrafficmap.org");
     snprintf(o->wifi_ssid, sizeof(o->wifi_ssid), "%s", c->wifi_ssid);
 
     ESP_LOGI(TAG, "OTM direct uploader config: SSID='%s' broker='%s' node='%s' packet_topic='%s'",
              o->wifi_ssid, o->broker_uri, c->node_id, o->topic);
+#ifdef CONFIG_OBU_OTM_TLS_TRACE
+    ESP_LOGW(TAG, "OpenTrafficMap TLS trace enabled; mbedTLS handshake diagnostics are active for development");
+#endif
 
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
