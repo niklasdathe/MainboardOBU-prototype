@@ -87,6 +87,24 @@ static const char *ipc_type_name(obu_ipc_type_t type)
     }
 }
 
+static void reset_c5_clock(const char *reason)
+{
+    bool was_valid;
+    uint32_t old_samples;
+    portENTER_CRITICAL(&c5_clock.lock);
+    was_valid = c5_clock.valid;
+    old_samples = c5_clock.samples;
+    c5_clock.c5_to_s3_offset_us = 0;
+    c5_clock.samples = 0;
+    c5_clock.last_rtt_us = 0;
+    c5_clock.valid = false;
+    portEXIT_CRITICAL(&c5_clock.lock);
+
+    if (was_valid || old_samples != 0) {
+        ESP_LOGI(TAG, "C5 clock relation invalidated: %s", reason != NULL ? reason : "link state changed");
+    }
+}
+
 static uint64_t c5_to_s3_monotonic(uint64_t c5_us)
 {
     portENTER_CRITICAL(&c5_clock.lock);
@@ -161,9 +179,14 @@ static void publish_clock_status(void)
 static void mark_c5_message(const obu_ipc_message_t *m)
 {
     const uint64_t now = obu_monotonic_us();
+    const bool had_previous_link = c5_last_message_us != 0;
     c5_last_message_us = now;
     c5_message_count++;
     if (!c5_link_online) {
+        if (had_previous_link) {
+            reset_c5_clock("C5 application link resumed after timeout");
+            publish_clock_status();
+        }
         c5_link_online = true;
         ESP_LOGI(TAG, "C5 application IPC active: first/resumed message type=%s(%u) seq=%u",
                  ipc_type_name(m->type), (unsigned)m->type, (unsigned)m->sequence);
@@ -220,7 +243,14 @@ static void ingest_ipc(const obu_ipc_message_t *m)
     } else if (m->type == OBU_IPC_RADIO_STATUS && m->payload_len >= sizeof(obu_radio_status_t)) {
         obu_radio_status_t s;
         memcpy(&s, m->payload, sizeof(s));
-        const bool state_changed = c5_status_count == 0u || c5_last_boot_nonce != s.boot_nonce || hmi.c5_online != s.radio_running;
+        const bool boot_changed = c5_status_count != 0u && c5_last_boot_nonce != s.boot_nonce;
+        const bool state_changed = c5_status_count == 0u || boot_changed || hmi.c5_online != s.radio_running;
+        if (boot_changed) {
+            ESP_LOGW(TAG, "C5 reboot detected: boot_nonce %u -> %u; discarding old clock relation",
+                     (unsigned)c5_last_boot_nonce, (unsigned)s.boot_nonce);
+            reset_c5_clock("C5 boot nonce changed");
+            publish_clock_status();
+        }
         c5_status_count++;
         c5_last_boot_nonce = s.boot_nonce;
         hmi.c5_online = s.radio_running;
@@ -310,7 +340,9 @@ static void monitor_c5_link(void)
     if (age_us > 3000000ULL && c5_link_online) {
         c5_link_online = false;
         hmi.c5_online = false;
-        ESP_LOGW(TAG, "C5 application IPC timeout: no message for %llu ms",
+        reset_c5_clock("C5 application link timeout");
+        publish_clock_status();
+        ESP_LOGW(TAG, "C5 application IPC timeout: no message for %llu ms; waiting for automatic recovery",
                  (unsigned long long)(age_us / 1000ULL));
     }
 
@@ -561,7 +593,7 @@ void app_main(void)
         .enabled = otm_direct_enabled,
         .wifi_ssid = CONFIG_OBU_WIFI_SSID,
         .wifi_password = CONFIG_OBU_WIFI_PASSWORD,
-        .broker_uri = "mqtts://cits1.opentrafficmap.org:8883",
+        .broker_uri = "mqtts://cits1.opentrafficmap.org",
         .node_id = CONFIG_OBU_OTM_NODE_ID,
     };
     if (obu_otm_wifi_start(&oc, &otm) != ESP_OK) ESP_LOGW(TAG, "OTM uploader not started");
