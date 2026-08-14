@@ -1,5 +1,24 @@
 # Prototype architecture
 
+## System view
+
+```mermaid
+flowchart LR
+    AIR[ITS-G5 / IEEE 802.11p] <--> C5[ESP32-C5\nradio endpoint]
+    C5 <--> |Versioned CRC SPI| S3[ESP32-S3\nhub/orchestrator]
+    GNSS[L76K GNSS] --> S3
+    RTC[PCF8563 RTC] <--> S3
+    PHONE[PhoneOBU] <-. BLE .-> S3
+    CAN[CAN sources] -. prepared .-> S3
+    BSENS[BLE bicycle sensors] -. prepared .-> S3
+
+    S3 --> BUS[Bounded canonical event bus]
+    BUS --> HMI[HMI model] --> DISPLAY[OLED / future LVGL display]
+    BUS --> WARNING[Warning controller] --> AUDIO[Expansion Base buzzer / future actuator]
+    BUS --> LOG[Diagnostic logger] --> SD[microSD]
+    BUS --> UPLINK[Optional uplink] --> OTM[OpenTrafficMap]
+```
+
 ## Responsibility split
 
 ### ESP32-C5
@@ -28,9 +47,11 @@ The electrical transport is deliberately replaceable. The same message codec can
 
 `esp_timer_get_time()` is the local acquisition clock. The S3 time service maintains an affine UTC anchor with an explicit quality enum (`UNSYNCED`, `RTC_HOLDOVER`, `GNSS`, `GNSS_PPS`). PCF8563 provides restart/temporary-GNSS-loss holdover. GNSS updates the RTC when UTC is valid. C5 timestamps stay C5-local in the radio record and are correlated on S3 via periodic four-timestamp time-probe exchanges. Each received radio record retains the radio hardware timestamp and C5 acquisition timestamp; the S3 stores a separate mapped hub-domain timestamp. Clock-offset, round-trip-time and sample-count records are emitted into the event bus so the achieved relationship can be recorded and characterized rather than assumed.
 
-## HMI model
+## HMI and warning outputs
 
-Application logic renders only `obu_hmi_model_t`. The prototype SSD1306 driver maps that model onto the Expansion Base OLED. A future GC9A01/LVGL Round Display driver implements the same `obu_display_driver_t` interface. No acquisition or warning logic depends on OLED/LVGL APIs.
+Application logic renders only `obu_hmi_model_t`. The prototype SSD1306 driver maps that model onto the Expansion Base OLED. A future GC9A01/LVGL Round Display driver implements the same `obu_display_driver_t` interface.
+
+Audible warnings are deliberately not part of the display driver. `obu_warning_controller_t` consumes canonical warning notifications and drives `obu_warning_output_t`. The Expansion Base passive buzzer driver uses PWM on A3/D3 and performs each tone in its own worker task so display rendering and beep duration cannot block the event consumer. The controller has a bounded recent-ID table for one audible episode per active canonical notification ID and exposes a mute boundary for future authenticated phone control. Display or warning-output initialization failure is non-fatal to source acquisition.
 
 ## Logging
 
@@ -46,18 +67,18 @@ Build-time YAML is used for human-reviewed hardware profiles because pin assignm
 
 ## Bicycle reference frame and sensor installation metadata
 
-The canonical bicycle frame is right-handed with its origin at the centre of the rear-wheel axle: **+X forward, +Y left, +Z up**. This convention occurs in bicycle/rider dynamics literature and keeps the longitudinal/left/up interpretation intuitive. Every spatial source shall either publish in this frame or carry a rigid transform into it. `obu_sensor_pose_t` stores translation, quaternion orientation, calibration revision and validity time; phone-side scientific provenance stores the full sensor identity/configuration alongside it.
+The canonical bicycle frame is right-handed with its origin at the centre of the rear-wheel axle: **+X forward, +Y left, +Z up**. Every spatial source shall either publish in this frame or carry a rigid transform into it. `obu_sensor_pose_t` stores translation, quaternion orientation, calibration revision and validity time; phone-side scientific provenance stores the full sensor identity/configuration alongside it.
 
 ## Configuration strategy
 
-Configuration is deliberately split by lifetime:
+Configuration is split by lifetime:
 
-- **YAML hardware profiles**: board/carrier wiring, pin ownership, I2C addresses, chip selects and mutually-exclusive accessory combinations. These are build/integration artefacts, not runtime files on the MCU. A later generator can turn a validated profile into a C header/Kconfig defaults without changing driver APIs.
-- **Kconfig**: compile-time prototype features and safe defaults such as whether the optional direct OTM development path is enabled by default.
-- **Authenticated runtime control + NVS**: user/changeable operating settings such as radio channel, sensor rates, enabled sources, display policy and uploader endpoint. The BLE implementation is intentionally deferred, but its control/reply boundary is defined in `obu_ble_phone_backend_t`.
-- **Phone/session provenance**: DBC definitions, sensor poses/calibrations, routing-provider/profile and research-session configuration remain phone-side so adding a CAN device never requires an S3 reflash.
+- **YAML hardware profiles**: board/carrier wiring, pin ownership, I2C addresses, chip selects and mutually-exclusive accessory combinations.
+- **Kconfig**: compile-time prototype features and safe defaults, including local buzzer policy and optional direct OTM development uplink.
+- **Authenticated runtime control + NVS**: user/changeable settings such as radio channel, sensor rates, enabled sources, warning mute state, display policy and uploader endpoint. The BLE implementation is deferred, but its control/reply boundary is defined.
+- **Phone/session provenance**: DBC definitions, sensor poses/calibrations, routing-provider/profile and research-session configuration remain phone-side.
 
-Secrets should not be put in YAML committed to the repository. The current Kconfig Wi-Fi fields are development-only; production credentials belong in protected storage/provisioning.
+Secrets should not be put in YAML committed to the repository. Current Kconfig Wi-Fi fields are development-only; production credentials belong in protected storage/provisioning.
 
 ## Prepared but deliberately unimplemented interfaces
 

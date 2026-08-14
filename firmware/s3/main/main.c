@@ -21,6 +21,7 @@
 #include "obu_log.h"
 #include "obu_otm.h"
 #include "obu_time.h"
+#include "obu_warning.h"
 
 static const char *TAG = "s3_main";
 static obu_bus_t bus;
@@ -30,6 +31,9 @@ static obu_time_service_t timesvc;
 static obu_diag_logger_t *logger;
 static obu_otm_t *otm;
 static obu_hmi_model_t hmi;
+static obu_warning_output_t buzzer_output;
+static obu_warning_controller_t warning_controller;
+static bool warning_output_ready;
 static uint32_t seq;
 static uint32_t ipc_seq;
 static QueueHandle_t pps_queue;
@@ -193,6 +197,33 @@ static void process_gnss(const obu_event_t *e)
     }
 }
 
+static void process_warning(const obu_event_t *e)
+{
+    obu_warning_notification_t warning = {
+        .notification_id = 0,
+        .kind = OBU_WARNING_KIND_DENM,
+        .severity = OBU_WARNING_SEVERITY_WARNING,
+        .active = true,
+        .audible = true,
+    };
+    snprintf(warning.text, sizeof(warning.text), "V2X WARNING");
+
+    if (e->payload_len >= sizeof(warning)) {
+        memcpy(&warning, e->payload, sizeof(warning));
+    }
+
+    hmi.warning = warning.kind == OBU_WARNING_KIND_SYSTEM ? OBU_HMI_WARN_SYSTEM : OBU_HMI_WARN_DENM;
+    snprintf(hmi.warning_text, sizeof(hmi.warning_text), "%s",
+             warning.text[0] ? warning.text : "V2X WARNING");
+
+    if (warning_output_ready) {
+        esp_err_t err = obu_warning_controller_handle(&warning_controller, &warning);
+        if (err != ESP_OK && err != ESP_ERR_TIMEOUT) {
+            ESP_LOGW(TAG, "warning output failed: %s", esp_err_to_name(err));
+        }
+    }
+}
+
 static void event_consumer(void *arg)
 {
     (void)arg;
@@ -206,9 +237,7 @@ static void event_consumer(void *arg)
             (void)obu_diag_log_event(logger, &e, "event");
         }
         if (e.type == OBU_DATA_WARNING) {
-            hmi.warning = OBU_HMI_WARN_DENM;
-            snprintf(hmi.warning_text, sizeof(hmi.warning_text), "V2X WARNING");
-            (void)obu_buzzer_beep(2200, 100);
+            process_warning(&e);
         }
     }
 }
@@ -217,7 +246,9 @@ static void hmi_task(void *arg)
 {
     (void)arg;
     for (;;) {
-        (void)display.ops->render(&display, &hmi);
+        if (display.ops != NULL && display.ops->render != NULL) {
+            (void)display.ops->render(&display, &hmi);
+        }
         vTaskDelay(pdMS_TO_TICKS(200));
     }
 }
@@ -296,6 +327,7 @@ static void publish_startup_status(void)
 void app_main(void)
 {
     obu_bus_init(&bus);
+
     i2c_master_bus_config_t ib = {
         .i2c_port = I2C_NUM_0,
         .sda_io_num = 5,
@@ -307,9 +339,32 @@ void app_main(void)
     i2c_master_bus_handle_t i2c;
     ESP_ERROR_CHECK(i2c_new_master_bus(&ib, &i2c));
     ESP_ERROR_CHECK(obu_time_init(&timesvc, i2c));
-    ESP_ERROR_CHECK(obu_ssd1306_create(i2c, 0x3c, &display));
-    ESP_ERROR_CHECK(obu_buzzer_init(GPIO_NUM_4));
+
+    esp_err_t display_err = obu_ssd1306_create(i2c, 0x3c, &display);
+    if (display_err != ESP_OK) {
+        ESP_LOGW(TAG, "OLED unavailable; acquisition continues: %s", esp_err_to_name(display_err));
+    }
     hmi.phone_connected = false;
+
+#ifdef CONFIG_OBU_BUZZER_ENABLE
+    obu_expansion_buzzer_config_t buzzer_config = {
+        .gpio = GPIO_NUM_4,
+        .frequency_hz = CONFIG_OBU_BUZZER_FREQUENCY_HZ,
+        .duration_ms = CONFIG_OBU_BUZZER_DURATION_MS,
+        .queue_depth = 4,
+    };
+    esp_err_t buzzer_err = obu_expansion_buzzer_create(&buzzer_config, &buzzer_output);
+    if (buzzer_err == ESP_OK) {
+        obu_warning_controller_init(&warning_controller, &buzzer_output);
+#ifdef CONFIG_OBU_BUZZER_DEFAULT_MUTED
+        (void)obu_warning_controller_set_audio_enabled(&warning_controller, false);
+#endif
+        warning_output_ready = true;
+    } else {
+        ESP_LOGW(TAG, "local warning buzzer unavailable; acquisition continues: %s",
+                 esp_err_to_name(buzzer_err));
+    }
+#endif
 
     spi_bus_config_t sb = {
         .mosi_io_num = 9,
@@ -361,8 +416,13 @@ void app_main(void)
     };
     if (obu_diag_logger_start(&lc, &logger) != ESP_OK) ESP_LOGW(TAG, "SD diagnostic log unavailable");
 
+#ifdef CONFIG_OBU_OTM_DIRECT_ENABLE
+    const bool otm_direct_enabled = true;
+#else
+    const bool otm_direct_enabled = false;
+#endif
     obu_otm_wifi_config_t oc = {
-        .enabled = CONFIG_OBU_OTM_DIRECT_ENABLE,
+        .enabled = otm_direct_enabled,
         .wifi_ssid = CONFIG_OBU_WIFI_SSID,
         .wifi_password = CONFIG_OBU_WIFI_PASSWORD,
         .broker_uri = "mqtts://cits1.opentrafficmap.org:8883",
@@ -371,7 +431,7 @@ void app_main(void)
     if (obu_otm_wifi_start(&oc, &otm) != ESP_OK) ESP_LOGW(TAG, "OTM uploader not started");
 
     publish_startup_status();
-    if (xTaskCreate(hmi_task, "hmi", 4096, NULL, 5, NULL) != pdPASS) abort();
+    if (display.ops != NULL && xTaskCreate(hmi_task, "hmi", 4096, NULL, 5, NULL) != pdPASS) abort();
     if (xTaskCreate(time_probe_task, "c5_clock", 3072, NULL, 8, NULL) != pdPASS) abort();
 
     for (;;) {

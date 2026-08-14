@@ -1,14 +1,46 @@
 menu "BicycleOBU prototype"
+
+config OBU_BUZZER_ENABLE
+    bool "Enable Expansion Base local warning buzzer"
+    default y
+    help
+        Enable the passive buzzer on the XIAO Expansion Base A3/D3 pin as a
+        local warning output. The output is independent of the phone and OLED.
+
+config OBU_BUZZER_DEFAULT_MUTED
+    bool "Start local warning buzzer muted"
+    depends on OBU_BUZZER_ENABLE
+    default n
+    help
+        Start with audible warning output muted. Runtime control can later
+        change this state through the authenticated control-plane interface.
+
+config OBU_BUZZER_FREQUENCY_HZ
+    int "Warning buzzer frequency (Hz)"
+    depends on OBU_BUZZER_ENABLE
+    range 100 10000
+    default 2200
+
+config OBU_BUZZER_DURATION_MS
+    int "Warning buzzer pulse duration (ms)"
+    depends on OBU_BUZZER_ENABLE
+    range 20 1000
+    default 120
+
 config OBU_OTM_DIRECT_ENABLE
     bool "Enable direct OpenTrafficMap Wi-Fi uploader"
     default n
+
 config OBU_WIFI_SSID
     string "Development Wi-Fi SSID"
     default ""
+
 config OBU_WIFI_PASSWORD
     string "Development Wi-Fi password"
     default ""
+
 config OBU_OTM_NODE_ID
     string "OpenTrafficMap node id"
     default "bicycleobu-prototype"
+
 endmenu

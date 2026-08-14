@@ -1,55 +1,76 @@
-# MainboardOBU Prototype Firmware
+# MainboardOBU Prototype
 
-ESP-IDF firmware for the BicycleOBU prototype mainboard. The repository is intentionally split into reusable components: the ESP32-C5 is a dedicated ITS-G5 radio endpoint and the ESP32-S3 is the bicycle hub/orchestrator.
+[![ESP-IDF build](https://github.com/niklasdathe/MainboardOBU-prototype/actions/workflows/build.yml/badge.svg)](https://github.com/niklasdathe/MainboardOBU-prototype/actions/workflows/build.yml)
 
-## Scope and compliance stance
+Reusable ESP-IDF firmware for the BicycleOBU prototype mainboard. The ESP32-C5 is a dedicated ITS-G5 radio endpoint; the ESP32-S3 is the embedded hub for time, GNSS, local HMI/warnings, logging and future CAN/BLE sources.
 
-This implementation follows `BicycleOBU_Requirements_v1_1_ETSI_VITS_S.xlsx` as the governing architecture. It implements the prototype functions that can be implemented with the selected hardware while **refusing to claim ETSI VAM conformance when a required backend or acceptance gate is absent**.
+This is a research prototype. Experimental safety and V2X-transmit functions are not certified and do not replace rider attention or regulatory compliance.
 
-Implemented now:
+## Status
 
-- ESP32-C5 5.9 GHz ITS-G5 receive backend using isolated ESP32-C5 802.11p ROM hooks.
-- Raw frame forwarding, capture metadata, bounded queues, drop counters, C5 health/status, channel selection, raw TX request/result handling and boot-session TX arming.
-- Versioned CRC-protected C5↔S3 SPI application protocol; S3 is master, C5 is slave.
-- S3 canonical event model with source/provenance/acquisition timestamps, C5↔S3 clock correlation and bounded fan-out queues.
-- Expansion Base SSD1306 OLED through a hardware-neutral HMI model.
-- L76K GNSS UART/NMEA acquisition, raw NMEA and parsed fixes, PPS input, PCF8563 RTC holdover and monotonic/UTC time service.
-- Expansion Base microSD diagnostic/fault logging with bounded rotating files.
-- Optional, explicit-opt-in OpenTrafficMap live uploader from the S3 over Wi-Fi/MQTT TLS. Frames are never replayed after an outage.
-- Interfaces for CAN, BLE phone/sensors, LDM, ETSI VAM codec, PoTi, security, DCC/GeoNetworking/BTP and alternate uplinks such as LoRaWAN.
-- Build-time YAML hardware manifests plus a pin-conflict checker.
+| Area | Current evidence |
+|---|---|
+| ESP32-C5 radio endpoint | ITS-G5 raw RX/TX boundary, metadata, bounded buffering, status and fail-safe per-boot TX arming implemented |
+| ESP32-S3 hub | Canonical event bus, SPI link, GNSS/time, OLED, local buzzer, SD diagnostic logging and optional OTM uplink implemented |
+| Local warning output | Expansion Base passive buzzer on A3/D3 (XIAO S3 GPIO4), asynchronous output, runtime mute boundary and warning-episode deduplication implemented |
+| Hardware abstraction | Replaceable display, warning-output, radio, GNSS, uplink and standards interfaces; YAML hardware profiles validated at integration time |
+| ETSI VAM conformance | Explicit codec/PoTi/security/GN-BTP-DCC gates exist; production implementations and HIL/RF verification remain pending |
 
-Not falsely claimed as complete/conformant:
+Source review and a successful firmware build are not complete-system validation. RF, timing, endurance and warning acceptance tests still require hardware.
 
-- ETSI TS 103 300-3 UPER VAM encoding is behind `obu_vam_codec_t` and has no production codec in this repository yet.
-- ETSI TS 103 097 signing/credential management is behind `obu_security_backend_t` and is not implemented by the prototype.
-- GeoNetworking/BTP/DCC and production PoTi are explicit interfaces/gates, not mocked.
-- The L76K prototype path does not satisfy the workbook's <0.5 m full-conformance positioning gate.
-- 5.9 GHz TX remains experimental and must be enabled only in a lawful test environment. The C5 comes up receive-only after every reset.
+## Start here
 
-## Repository layout
+| Goal | Guide |
+|---|---|
+| Understand the component split | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
+| Find the document for a development task | [`docs/README.md`](docs/README.md) |
+| Check workbook coverage and open verification | [`docs/REQUIREMENT_TRACEABILITY.md`](docs/REQUIREMENT_TRACEABILITY.md) |
+| Wire the Expansion Base prototype | [`docs/HARDWARE.md`](docs/HARDWARE.md) |
+| Build and validate both MCUs | [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) |
 
-```text
-firmware/c5/           ESP32-C5 application
-firmware/s3/           ESP32-S3 hub application
-components/obu_core/   canonical event/data model + bounded event bus
-components/obu_ipc/    versioned SPI protocol and ESP-IDF SPI endpoints
-components/obu_radio/  radio interface + ESP32-C5 ITS-G5 backend
-components/obu_hmi/    abstract HMI model + SSD1306 renderer
-components/obu_time/   monotonic/UTC correlation + PCF8563 RTC driver
-components/obu_gnss/   GNSS interface + L76K NMEA UART driver
-components/obu_log/    rotating SD diagnostic logger
-components/obu_otm/    live OTM publisher + uplink boundary
-components/obu_ifaces/ interfaces required by the architecture but not yet implemented
-config/hardware/       human-readable hardware manifests
-scripts/               pin-plan validation
+## Architecture
+
+```mermaid
+flowchart LR
+    AIR[ITS-G5 / IEEE 802.11p] <--> C5[ESP32-C5\nradio endpoint]
+    C5 <--> |Versioned CRC SPI| S3[ESP32-S3\nembedded hub]
+
+    GNSS[L76K GNSS] --> S3
+    RTC[PCF8563 RTC] <--> S3
+    CAN[CAN / MCP2515\nprepared interface] -.-> S3
+    BSENS[BLE bicycle sensors\nprepared interface] -.-> S3
+    PHONE[PhoneOBU\nBLE control + data] <-.-> S3
+
+    S3 --> BUS[Canonical obu_event_t bus]
+    BUS --> HMI[HMI model] --> OLED[Expansion Base OLED]
+    BUS --> WARN[Warning controller] --> BUZZER[Expansion Base\npassive buzzer D3]
+    BUS --> LOG[Diagnostic logger] --> SD[microSD]
+    BUS --> OTM[Optional uplink interface] --> WIFI[Wi-Fi / MQTT TLS] --> OTMCloud[OpenTrafficMap]
+
+    S3 -. future VAM model .-> VAM[VAM / PoTi / security /\nGN-BTP-DCC interfaces] -. radio-ready frame .-> C5
 ```
 
-## Build
+The display and buzzer are consumers of the S3 data model, not owners of warning or acquisition logic. Replacing the OLED with an LVGL round-display driver, or replacing the Expansion Base buzzer with another audible/haptic actuator, does not change the source/event architecture.
 
-Use ESP-IDF with ESP32-C5 support. The private ESP32-C5 802.11p ROM symbols are isolated in `obu_radio`.
+## Hardware at a glance
+
+| Function | Prototype hardware | S3 connection |
+|---|---|---|
+| OLED | Expansion Base SSD1306 | I²C D4/D5 |
+| RTC | Expansion Base PCF8563 | shared I²C D4/D5 |
+| Diagnostic storage | Expansion Base microSD | SPI D8/D9/D10, CS D2 |
+| Audible warnings | Expansion Base passive buzzer | A3/D3 = GPIO4 |
+| GNSS | XIAO L76K | UART D6/D7; PPS reserved on D12 |
+| C5 link | XIAO ESP32-C5 | shared SPI, CS D0, DATA_READY D11 |
+
+The unmodified XIAO CAN expansion uses D7 as MCP2515 CS, which conflicts with the selected L76K UART profile. Use a carrier/rerouted CS rather than blind stacking when both are fitted.
+
+## Development workflow
 
 ```bash
+python scripts/check_pin_plan.py config/hardware/prototype-expansion-base.yaml
+python scripts/check_pin_plan.py config/hardware/round-display-carrier.yaml
+
 idf.py -C firmware/c5 set-target esp32c5
 idf.py -C firmware/c5 build
 
@@ -58,15 +79,28 @@ idf.py -C firmware/s3 menuconfig
 idf.py -C firmware/s3 build
 ```
 
-The S3 defaults to OpenTrafficMap upload **off**. Development Wi-Fi credentials and the opt-in switch can be supplied in `menuconfig`; production configuration belongs behind the authenticated control-plane interface.
+The S3 defaults to direct OpenTrafficMap upload **off**. The local warning buzzer defaults **enabled and unmuted** but exposes a runtime mute boundary; the final authenticated BLE control implementation can bind to that boundary without changing the warning driver.
 
-## Prototype wiring profile
+## Source of truth
 
-The selected Expansion Base, L76K and C5 link cannot be treated as a pile of stackable XIAO boards. The default prototype profile shares the S3 hardware SPI bus between SD and C5, uses separate chip selects, and reserves D6/D7 for L76K UART. C5 `DATA_READY` is routed to S3 GPIO42/D11 so the Expansion Base D1 user-button net is not driven. The Seeed CAN board uses D7 as its MCP2515 chip select, so it must be re-routed by the carrier if GNSS and CAN are required concurrently. The Round Display likewise requires a carrier/profile change rather than blind stacking.
+| Question | Source |
+|---|---|
+| System/acceptance requirements | `BicycleOBU_Requirements_v1_1_ETSI_VITS_S.xlsx` in the parent project |
+| Prototype responsibilities and data flow | `docs/ARCHITECTURE.md` |
+| Implemented/open requirement mapping | `docs/REQUIREMENT_TRACEABILITY.md` |
+| Pin ownership and accessory conflicts | `config/hardware/*.yaml` + `scripts/check_pin_plan.py` |
+| C5/S3 protocol | `components/obu_ipc/` |
+| Warning-output contract | `components/obu_warning/` |
+| CI compiler evidence | `.github/workflows/build.yml` and GitHub Actions |
 
-```bash
-python scripts/check_pin_plan.py config/hardware/prototype-expansion-base.yaml
-python scripts/check_pin_plan.py config/hardware/round-display-carrier.yaml
-```
+## Safety and data rules
 
-See `docs/ARCHITECTURE.md` and `docs/REQUIREMENT_TRACEABILITY.md` before enabling TX.
+- The C5 boots receive-only; TX requires explicit arming for the current boot session.
+- Missing or stale data must stay explicit; embedded code must not invent C-ITS or sensor values.
+- Raw V2X bytes and acquisition/provenance timestamps are retained separately from derived state.
+- Repeated receptions belonging to one active warning episode may update logs/display but must not repeatedly actuate the rider warning output when they share the same canonical notification ID.
+- Display, buzzer, SD or uplink failure must not intentionally stop radio/GNSS/source acquisition.
+
+## License
+
+No project license has been selected. Until one is added, this repository must not be presented as granting software or documentation reuse rights.

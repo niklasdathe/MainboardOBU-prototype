@@ -4,6 +4,16 @@ on:
   pull_request:
 
 jobs:
+  validate-hardware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate hardware profiles
+        run: |
+          python -m pip install --disable-pip-version-check pyyaml
+          python scripts/check_pin_plan.py config/hardware/prototype-expansion-base.yaml
+          python scripts/check_pin_plan.py config/hardware/round-display-carrier.yaml
+
   build-c5:
     runs-on: ubuntu-latest
     container: espressif/idf:release-v5.5
