@@ -19,6 +19,8 @@ idf.py -C firmware/s3 menuconfig
 idf.py -C firmware/s3 build
 ```
 
+`firmware/s3/sdkconfig.defaults` captures the prototype board assumptions that must be reproducible in CI: the Seeed Studio XIAO ESP32-S3 has 8 MB flash, and the project uses ESP-IDF's standard 1.5 MiB **single factory app (large), no OTA** partition layout. The linked S3 image is larger than ESP-IDF's default 1 MiB factory slot because it includes the hub, Wi-Fi/MQTT TLS, FAT/SD, GNSS/time, display and warning paths. OTA is not implemented in this prototype; a future OTA design must replace the partition layout deliberately rather than silently shrinking the application slots.
+
 Relevant S3 prototype options live under **BicycleOBU prototype** in Kconfig:
 
 - local Expansion Base warning buzzer enable/mute/frequency/duration;
@@ -38,6 +40,6 @@ This is a structural pin-ownership check, not electrical validation of the assem
 
 ## CI interpretation
 
-A green workflow proves that both firmware targets configure and compile under the pinned ESP-IDF release. It does not prove RF behavior, warning audibility, timing accuracy, storage endurance or multi-interface real-time performance.
+A green workflow proves that both firmware targets configure, compile, link, generate flash images and pass ESP-IDF's application-partition size check under the pinned ESP-IDF release. It does not prove RF behavior, warning audibility, timing accuracy, storage endurance or multi-interface real-time performance.
 
 Hardware acceptance evidence still needs the workbook-defined scenario/fault/endurance tests, including phone-disconnected warning tests and repeated-DENM deduplication tests.
