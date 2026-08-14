@@ -14,6 +14,8 @@
 #define CRC_OFFSET 28u
 #define CRC_LEN 4u
 #define IPC_POLL_INTERVAL_MS 20u
+#define IPC_RESPONSE_BURST_POLLS 3u
+#define IPC_RESPONSE_BURST_DELAY_MS 1u
 #define IPC_TASK_STACK_BYTES 6144u
 #define IPC_DIAG_INTERVAL_US 5000000ULL
 
@@ -227,22 +229,39 @@ static void master_task(void *arg)
     static uint8_t tx[OBU_IPC_TRANSFER_BYTES];
     static uint8_t rx[OBU_IPC_TRANSFER_BYTES];
     uint32_t nop_sequence = 0;
+    uint32_t response_burst_remaining = 0;
     TickType_t last_poll = 0;
 
     for (;;) {
         const bool outbound = uxQueueMessagesWaiting(ep->txq) > 0;
         const bool ready = data_ready_enabled(ep) && gpio_get_level(ep->cfg.gpio_data_ready) != 0;
+        const bool response_burst = response_burst_remaining > 0;
         const TickType_t now_tick = xTaskGetTickCount();
         const bool periodic = (now_tick - last_poll) >= pdMS_TO_TICKS(IPC_POLL_INTERVAL_MS);
-        if (!outbound && !ready && !periodic) {
+        if (!outbound && !ready && !periodic && !response_burst) {
             vTaskDelay(pdMS_TO_TICKS(2));
             continue;
         }
-        last_poll = now_tick;
+
+        /*
+         * The prototype has no DATA_READY wire. A slave response can only be
+         * loaded after the transaction that delivered the request has finished,
+         * so waiting for the normal 20 ms poll interval on every follow-up adds
+         * roughly 40-60 ms to request/response RTT. After an application message
+         * is sent, issue a few closely spaced NOP polls to fetch the queued C5
+         * response without changing the normal idle bus load.
+         */
+        if (response_burst && !outbound && !ready && !periodic) {
+            vTaskDelay(pdMS_TO_TICKS(IPC_RESPONSE_BURST_DELAY_MS));
+        }
+        last_poll = xTaskGetTickCount();
 
         obu_ipc_message_t *msg = &ep->tx_scratch;
         prepare_nop(msg, nop_sequence++);
-        if (outbound) (void)xQueueReceive(ep->txq, msg, 0);
+        bool sent_application_message = false;
+        if (outbound && xQueueReceive(ep->txq, msg, 0) == pdTRUE) {
+            sent_application_message = msg->type != OBU_IPC_NOP;
+        }
 
         memset(tx, 0, sizeof(tx));
         memset(rx, 0, sizeof(rx));
@@ -266,6 +285,13 @@ static void master_task(void *arg)
             ep->spi_errors++;
             if (ep->spi_errors == 1u) ESP_LOGE(TAG, "S3-master SPI transaction failed: %s", esp_err_to_name(err));
         }
+
+        if (sent_application_message) {
+            response_burst_remaining = IPC_RESPONSE_BURST_POLLS;
+        } else if (response_burst_remaining > 0) {
+            response_burst_remaining--;
+        }
+
         log_link_stats(ep);
     }
 }
