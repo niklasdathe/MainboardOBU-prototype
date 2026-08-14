@@ -2,9 +2,13 @@
 
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
 #include "obu_core.h"
 #include "obu_ipc.h"
 #include "obu_radio.h"
+
+#define S3_LINK_FORWARD_FRESH_US 1500000ULL
+#define S3_LINK_TIMEOUT_US 3000000ULL
 
 static const char *TAG = "c5_main";
 static obu_ipc_endpoint_t *ipc;
@@ -14,7 +18,10 @@ static uint32_t status_count;
 static uint32_t s3_message_count;
 static uint32_t time_probe_count;
 static uint32_t radio_rx_count;
+static uint32_t radio_rx_link_drop_count;
+static uint64_t s3_last_message_us;
 static bool s3_seen;
+static portMUX_TYPE s3_link_lock = portMUX_INITIALIZER_UNLOCKED;
 
 static obu_ipc_message_t status_message;
 static obu_ipc_message_t radio_rx_message;
@@ -67,6 +74,18 @@ static const char *ipc_type_name(obu_ipc_type_t type)
         case OBU_IPC_ACK: return "ACK";
         default: return "UNKNOWN";
     }
+}
+
+static bool s3_link_fresh(uint64_t max_age_us)
+{
+    const uint64_t now = obu_monotonic_us();
+    uint64_t last;
+    bool seen;
+    portENTER_CRITICAL(&s3_link_lock);
+    last = s3_last_message_us;
+    seen = s3_seen;
+    portEXIT_CRITICAL(&s3_link_lock);
+    return seen && last != 0 && now >= last && now - last <= max_age_us;
 }
 
 static void send_status(void)
@@ -122,6 +141,17 @@ static void on_rx(const obu_v2x_rx_meta_t *meta, const uint8_t *frame, size_t le
                  (unsigned long long)meta->radio_hw_timestamp_us);
     }
 
+    /* OpenTrafficMap/live acquisition must not replay frames accumulated while
+     * the S3 was absent. A fresh S3 time-probe/control message is the heartbeat. */
+    if (!s3_link_fresh(S3_LINK_FORWARD_FRESH_US)) {
+        radio_rx_link_drop_count++;
+        if (radio_rx_link_drop_count == 1u || (radio_rx_link_drop_count % 100u) == 0u) {
+            ESP_LOGW(TAG, "Dropping live V2X frame while S3 link is unavailable/stale: dropped=%u",
+                     (unsigned)radio_rx_link_drop_count);
+        }
+        return;
+    }
+
     memset(&radio_rx_message, 0, sizeof(radio_rx_message));
     radio_rx_message.type = OBU_IPC_RX_FRAME;
     radio_rx_message.sequence = ipc_seq++;
@@ -138,14 +168,41 @@ static void on_rx(const obu_v2x_rx_meta_t *meta, const uint8_t *frame, size_t le
 
 static void mark_s3_message(const obu_ipc_message_t *m)
 {
+    const uint64_t now = obu_monotonic_us();
+    bool was_seen;
+    portENTER_CRITICAL(&s3_link_lock);
+    was_seen = s3_seen;
+    s3_seen = true;
+    s3_last_message_us = now;
+    portEXIT_CRITICAL(&s3_link_lock);
+
     s3_message_count++;
-    if (!s3_seen) {
-        s3_seen = true;
-        ESP_LOGI(TAG, "S3 application IPC active: first message type=%s(%u) seq=%u",
+    if (!was_seen) {
+        ESP_LOGI(TAG, "S3 application IPC active/resumed: first message type=%s(%u) seq=%u",
                  ipc_type_name(m->type), (unsigned)m->type, (unsigned)m->sequence);
     }
     ESP_LOGD(TAG, "S3 IPC RX type=%s(%u) seq=%u payload=%u",
              ipc_type_name(m->type), (unsigned)m->type, (unsigned)m->sequence, (unsigned)m->payload_len);
+}
+
+static void monitor_s3_link(void)
+{
+    const uint64_t now = obu_monotonic_us();
+    uint64_t last;
+    bool timed_out = false;
+
+    portENTER_CRITICAL(&s3_link_lock);
+    last = s3_last_message_us;
+    if (s3_seen && last != 0 && now >= last && now - last > S3_LINK_TIMEOUT_US) {
+        s3_seen = false;
+        timed_out = true;
+    }
+    portEXIT_CRITICAL(&s3_link_lock);
+
+    if (timed_out) {
+        ESP_LOGW(TAG, "S3 application IPC timeout after %llu ms; suppressing live-frame/status backlog until heartbeat returns",
+                 (unsigned long long)((now - last) / 1000ULL));
+    }
 }
 
 static void handle(const obu_ipc_message_t *m)
@@ -235,7 +292,7 @@ void app_main(void)
         .clock_hz = 8000000,
     };
     ESP_ERROR_CHECK(obu_ipc_init(&ipc_config, &ipc));
-    ESP_LOGI(TAG, "C5 IPC slave initialized; waiting for S3 SPI clocks");
+    ESP_LOGI(TAG, "C5 IPC slave initialized; boot order is independent, waiting for S3 SPI clocks");
 
     obu_radio_config_t radio_config = {
         .frequency_mhz = 5900,
@@ -245,12 +302,17 @@ void app_main(void)
     ESP_ERROR_CHECK(obu_radio_start(radio));
     ESP_LOGI(TAG, "C5 V2X radio started at 5900 MHz");
 
+    /* Queue exactly one initial status so an S3 that boots later gets a useful
+     * first response. Do not build an unbounded stale status/frame backlog while
+     * the S3 is absent. */
     send_status();
     uint64_t last_status_us = 0;
     for (;;) {
         if (obu_ipc_receive(ipc, &main_rx_message, pdMS_TO_TICKS(250)) == ESP_OK) handle(&main_rx_message);
+        monitor_s3_link();
+
         const uint64_t now = obu_monotonic_us();
-        if (now - last_status_us > 1000000ULL) {
+        if (s3_link_fresh(S3_LINK_FORWARD_FRESH_US) && now - last_status_us > 1000000ULL) {
             send_status();
             last_status_us = now;
         }
