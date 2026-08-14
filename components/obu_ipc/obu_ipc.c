@@ -6,11 +6,18 @@
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
 #include "driver/spi_slave.h"
+#include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/task.h"
 
 #define HDR_LEN 32u
+#define CRC_OFFSET 28u
+#define CRC_LEN 4u
 #define IPC_POLL_INTERVAL_MS 20u
+#define IPC_TASK_STACK_BYTES 6144u
+#define IPC_STACK_REPORT_INTERVAL 5000u
+
+static const char *TAG = "obu_ipc";
 
 struct obu_ipc_endpoint {
     obu_ipc_config_t cfg;
@@ -21,6 +28,9 @@ struct obu_ipc_endpoint {
     uint32_t crc_errors;
     uint32_t queue_drops;
     uint32_t tx_queue_drops;
+    /* Large message scratch storage belongs on the heap, not on a FreeRTOS task stack. */
+    obu_ipc_message_t tx_scratch;
+    obu_ipc_message_t rx_scratch;
 };
 
 static uint16_t rd16(const uint8_t *p)
@@ -56,16 +66,35 @@ static void wr64(uint8_t *p, uint64_t value)
     wr32(p + 4, (uint32_t)(value >> 32));
 }
 
-static uint32_t crc32_ieee(const uint8_t *data, size_t len)
+static uint32_t crc32_ieee_frame(const uint8_t *data, size_t len)
 {
     uint32_t crc = ~0u;
-    while (len-- > 0) {
-        crc ^= *data++;
+    for (size_t i = 0; i < len; ++i) {
+        /* The CRC field is defined as zero while the frame CRC is calculated. */
+        const uint8_t byte = (i >= CRC_OFFSET && i < CRC_OFFSET + CRC_LEN) ? 0u : data[i];
+        crc ^= byte;
         for (int bit = 0; bit < 8; ++bit) {
             crc = (crc >> 1) ^ (0xEDB88320u & (uint32_t)-(int32_t)(crc & 1u));
         }
     }
     return ~crc;
+}
+
+static void prepare_nop(obu_ipc_message_t *msg, uint32_t sequence)
+{
+    memset(msg, 0, sizeof(*msg));
+    msg->type = OBU_IPC_NOP;
+    msg->sequence = sequence;
+    msg->source_monotonic_us = (uint64_t)esp_timer_get_time();
+}
+
+static void report_stack_watermark(const char *task_name, uint32_t *counter)
+{
+    (*counter)++;
+    if (*counter == 1u || (*counter % IPC_STACK_REPORT_INTERVAL) == 0u) {
+        const UBaseType_t minimum_free = uxTaskGetStackHighWaterMark(NULL);
+        ESP_LOGI(TAG, "%s minimum free stack: %u bytes", task_name, (unsigned)minimum_free);
+    }
 }
 
 esp_err_t obu_ipc_encode(const obu_ipc_message_t *msg,
@@ -95,8 +124,7 @@ esp_err_t obu_ipc_encode(const obu_ipc_message_t *msg,
         memcpy(out + HDR_LEN, msg->payload, msg->payload_len);
     }
 
-    wr32(out + 28, 0);
-    wr32(out + 28, crc32_ieee(out, encoded_len));
+    wr32(out + CRC_OFFSET, crc32_ieee_frame(out, encoded_len));
     if (out_len != NULL) {
         *out_len = encoded_len;
     }
@@ -120,11 +148,8 @@ esp_err_t obu_ipc_decode(const uint8_t *buf, size_t len, obu_ipc_message_t *msg)
         return ESP_ERR_INVALID_SIZE;
     }
 
-    uint8_t tmp[OBU_IPC_TRANSFER_BYTES];
-    memcpy(tmp, buf, encoded_len);
-    const uint32_t expected_crc = rd32(tmp + 28);
-    wr32(tmp + 28, 0);
-    if (crc32_ieee(tmp, encoded_len) != expected_crc) {
+    const uint32_t expected_crc = rd32(buf + CRC_OFFSET);
+    if (crc32_ieee_frame(buf, encoded_len) != expected_crc) {
         return ESP_ERR_INVALID_CRC;
     }
 
@@ -142,16 +167,16 @@ esp_err_t obu_ipc_decode(const uint8_t *buf, size_t len, obu_ipc_message_t *msg)
 
 static void enqueue_rx(obu_ipc_endpoint_t *ep, const uint8_t *buf, size_t len)
 {
-    obu_ipc_message_t msg;
-    const esp_err_t err = obu_ipc_decode(buf, len, &msg);
+    obu_ipc_message_t *msg = &ep->rx_scratch;
+    const esp_err_t err = obu_ipc_decode(buf, len, msg);
     if (err == ESP_ERR_INVALID_CRC) {
         ep->crc_errors++;
         return;
     }
-    if (err != ESP_OK || msg.type == OBU_IPC_NOP) {
+    if (err != ESP_OK || msg->type == OBU_IPC_NOP) {
         return;
     }
-    if (xQueueSend(ep->rxq, &msg, 0) != pdTRUE) {
+    if (xQueueSend(ep->rxq, msg, 0) != pdTRUE) {
         ep->queue_drops++;
     }
 }
@@ -174,6 +199,7 @@ static void master_task(void *arg)
     static uint8_t tx[OBU_IPC_TRANSFER_BYTES];
     static uint8_t rx[OBU_IPC_TRANSFER_BYTES];
     uint32_t nop_sequence = 0;
+    uint32_t stack_report_counter = 0;
     TickType_t last_poll = 0;
 
     for (;;) {
@@ -187,19 +213,16 @@ static void master_task(void *arg)
         }
         last_poll = now_tick;
 
-        obu_ipc_message_t msg = {
-            .type = OBU_IPC_NOP,
-            .sequence = nop_sequence++,
-            .source_monotonic_us = (uint64_t)esp_timer_get_time(),
-        };
+        obu_ipc_message_t *msg = &ep->tx_scratch;
+        prepare_nop(msg, nop_sequence++);
         if (outbound) {
-            (void)xQueueReceive(ep->txq, &msg, 0);
+            (void)xQueueReceive(ep->txq, msg, 0);
         }
 
         memset(tx, 0, sizeof(tx));
         memset(rx, 0, sizeof(rx));
         size_t used = 0;
-        if (obu_ipc_encode(&msg, tx, sizeof(tx), &used) != ESP_OK) {
+        if (obu_ipc_encode(msg, tx, sizeof(tx), &used) != ESP_OK) {
             continue;
         }
 
@@ -210,6 +233,7 @@ static void master_task(void *arg)
         };
         if (spi_device_transmit(ep->master_dev, &transaction) == ESP_OK) {
             enqueue_rx(ep, rx, sizeof(rx));
+            report_stack_watermark("obu_ipc_m", &stack_report_counter);
         }
     }
 }
@@ -220,20 +244,18 @@ static void slave_task(void *arg)
     static uint8_t tx[OBU_IPC_TRANSFER_BYTES];
     static uint8_t rx[OBU_IPC_TRANSFER_BYTES];
     uint32_t nop_sequence = 0;
+    uint32_t stack_report_counter = 0;
 
     for (;;) {
-        obu_ipc_message_t msg = {
-            .type = OBU_IPC_NOP,
-            .sequence = nop_sequence++,
-            .source_monotonic_us = (uint64_t)esp_timer_get_time(),
-        };
-        const bool have_message = xQueueReceive(ep->txq, &msg, 0) == pdTRUE;
+        obu_ipc_message_t *msg = &ep->tx_scratch;
+        prepare_nop(msg, nop_sequence++);
+        const bool have_message = xQueueReceive(ep->txq, msg, 0) == pdTRUE;
         set_data_ready(ep, have_message ? 1 : 0);
 
         memset(tx, 0, sizeof(tx));
         memset(rx, 0, sizeof(rx));
         size_t used = 0;
-        if (obu_ipc_encode(&msg, tx, sizeof(tx), &used) != ESP_OK) {
+        if (obu_ipc_encode(msg, tx, sizeof(tx), &used) != ESP_OK) {
             set_data_ready(ep, 0);
             continue;
         }
@@ -247,6 +269,7 @@ static void slave_task(void *arg)
         set_data_ready(ep, 0);
         if (err == ESP_OK) {
             enqueue_rx(ep, rx, sizeof(rx));
+            report_stack_watermark("obu_ipc_s", &stack_report_counter);
         }
     }
 }
@@ -315,7 +338,7 @@ esp_err_t obu_ipc_init(const obu_ipc_config_t *cfg, obu_ipc_endpoint_t **out)
             }
         }
 
-        if (xTaskCreate(master_task, "obu_ipc_m", 8192, ep, 12, &ep->task) != pdPASS) {
+        if (xTaskCreate(master_task, "obu_ipc_m", IPC_TASK_STACK_BYTES, ep, 12, &ep->task) != pdPASS) {
             err = ESP_ERR_NO_MEM;
             goto fail;
         }
@@ -350,7 +373,7 @@ esp_err_t obu_ipc_init(const obu_ipc_config_t *cfg, obu_ipc_endpoint_t **out)
             gpio_set_level(cfg->gpio_data_ready, 0);
         }
 
-        if (xTaskCreate(slave_task, "obu_ipc_s", 8192, ep, 12, &ep->task) != pdPASS) {
+        if (xTaskCreate(slave_task, "obu_ipc_s", IPC_TASK_STACK_BYTES, ep, 12, &ep->task) != pdPASS) {
             err = ESP_ERR_NO_MEM;
             goto fail;
         }
