@@ -4,3 +4,4 @@ sdkconfig
 firmware/*/sdkconfig
 *.pcap
 .DS_Store
+.vscode/settings.json
