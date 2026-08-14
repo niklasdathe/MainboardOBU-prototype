@@ -1,6 +1,11 @@
 # Seeed Studio XIAO ESP32-S3 prototype hardware: 8 MB flash.
 CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
 
+# app_main performs I2C/RTC, SPI IPC, GNSS, SD and optional Wi-Fi/MQTT setup
+# before remaining alive as the S3 IPC receive loop. Keep enough stack for
+# that initialization path on ESP-IDF 5.5.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
 # The S3 hub links Wi-Fi/MQTT TLS, FAT/SD, GNSS/time, HMI and warning drivers.
 # ESP-IDF's default 1 MiB factory partition is too small. Use the standard
 # 1.5 MiB single-app development layout; OTA is intentionally not implemented
