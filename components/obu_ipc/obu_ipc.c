@@ -338,7 +338,7 @@ esp_err_t obu_ipc_init(const obu_ipc_config_t *cfg, obu_ipc_endpoint_t **out)
             }
         }
 
-        if (xTaskCreate(master_task, "obu_ipc_m", IPC_TASK_STACK_BYTES, ep, 12, &ep->task) != pdPASS) {
+    if (xTaskCreate(master_task, "obu_ipc_m", IPC_TASK_STACK_BYTES, ep, 12, &ep->task) != pdPASS) {
             err = ESP_ERR_NO_MEM;
             goto fail;
         }
@@ -373,7 +373,7 @@ esp_err_t obu_ipc_init(const obu_ipc_config_t *cfg, obu_ipc_endpoint_t **out)
             gpio_set_level(cfg->gpio_data_ready, 0);
         }
 
-        if (xTaskCreate(slave_task, "obu_ipc_s", IPC_TASK_STACK_BYTES, ep, 12, &ep->task) != pdPASS) {
+    if (xTaskCreate(slave_task, "obu_ipc_s", IPC_TASK_STACK_BYTES, ep, 12, &ep->task) != pdPASS) {
             err = ESP_ERR_NO_MEM;
             goto fail;
         }
@@ -427,3 +427,4 @@ uint32_t obu_ipc_tx_queue_drops(const obu_ipc_endpoint_t *ep)
 {
     return ep != NULL ? ep->tx_queue_drops : 0;
 }
+
