@@ -16,6 +16,8 @@
 #define IPC_POLL_INTERVAL_MS 20u
 #define IPC_RESPONSE_BURST_POLLS 3u
 #define IPC_RESPONSE_BURST_DELAY_MS 1u
+#define IPC_SLAVE_PEER_FRESH_US 250000ULL
+#define IPC_SLAVE_STALE_TX_US 2000000ULL
 #define IPC_TASK_STACK_BYTES 6144u
 #define IPC_DIAG_INTERVAL_US 5000000ULL
 
@@ -30,6 +32,7 @@ struct obu_ipc_endpoint {
     uint32_t crc_errors;
     uint32_t queue_drops;
     uint32_t tx_queue_drops;
+    uint32_t stale_tx_drops;
     uint32_t transfer_count;
     uint32_t valid_rx_count;
     uint32_t invalid_frame_count;
@@ -109,7 +112,7 @@ static void log_link_stats(obu_ipc_endpoint_t *ep)
 
     if (ep->last_valid_rx_us != 0) {
         ESP_LOGI(TAG,
-                 "%s link: transfers=%u valid_rx=%u invalid=%u crc=%u spi_err=%u rxq_drop=%u txq_drop=%u last_type=%u age=%llu ms",
+                 "%s link: transfers=%u valid_rx=%u invalid=%u crc=%u spi_err=%u rxq_drop=%u txq_drop=%u stale_tx=%u last_type=%u age=%llu ms",
                  role_name(ep),
                  (unsigned)ep->transfer_count,
                  (unsigned)ep->valid_rx_count,
@@ -118,18 +121,20 @@ static void log_link_stats(obu_ipc_endpoint_t *ep)
                  (unsigned)ep->spi_errors,
                  (unsigned)ep->queue_drops,
                  (unsigned)ep->tx_queue_drops,
+                 (unsigned)ep->stale_tx_drops,
                  (unsigned)ep->last_rx_type,
                  (unsigned long long)((now - ep->last_valid_rx_us) / 1000ULL));
     } else {
         ESP_LOGW(TAG,
-                 "%s link: no valid peer frame yet; transfers=%u invalid=%u crc=%u spi_err=%u rxq_drop=%u txq_drop=%u",
+                 "%s link: no valid peer frame yet; transfers=%u invalid=%u crc=%u spi_err=%u rxq_drop=%u txq_drop=%u stale_tx=%u",
                  role_name(ep),
                  (unsigned)ep->transfer_count,
                  (unsigned)ep->invalid_frame_count,
                  (unsigned)ep->crc_errors,
                  (unsigned)ep->spi_errors,
                  (unsigned)ep->queue_drops,
-                 (unsigned)ep->tx_queue_drops);
+                 (unsigned)ep->tx_queue_drops,
+                 (unsigned)ep->stale_tx_drops);
     }
 }
 
@@ -196,12 +201,17 @@ static void enqueue_rx(obu_ipc_endpoint_t *ep, const uint8_t *buf, size_t len)
         return;
     }
 
+    const uint64_t now = (uint64_t)esp_timer_get_time();
+    const bool recovered_after_gap = ep->last_valid_rx_us != 0 && now - ep->last_valid_rx_us > 1000000ULL;
     ep->valid_rx_count++;
     ep->last_rx_type = msg->type;
-    ep->last_valid_rx_us = (uint64_t)esp_timer_get_time();
+    ep->last_valid_rx_us = now;
     if (!ep->peer_seen) {
         ep->peer_seen = true;
         ESP_LOGI(TAG, "%s IPC peer responded with valid frame type=%u seq=%u",
+                 role_name(ep), (unsigned)msg->type, (unsigned)msg->sequence);
+    } else if (recovered_after_gap) {
+        ESP_LOGI(TAG, "%s IPC peer recovered after link gap; type=%u seq=%u",
                  role_name(ep), (unsigned)msg->type, (unsigned)msg->sequence);
     }
 
@@ -221,6 +231,18 @@ static bool data_ready_enabled(const obu_ipc_endpoint_t *ep)
 static void set_data_ready(obu_ipc_endpoint_t *ep, int level)
 {
     if (data_ready_enabled(ep)) gpio_set_level(ep->cfg.gpio_data_ready, level);
+}
+
+static bool slave_peer_fresh(const obu_ipc_endpoint_t *ep, uint64_t now)
+{
+    return ep->last_valid_rx_us != 0 && now >= ep->last_valid_rx_us &&
+           now - ep->last_valid_rx_us <= IPC_SLAVE_PEER_FRESH_US;
+}
+
+static bool slave_message_stale(const obu_ipc_message_t *msg, uint64_t now)
+{
+    return msg->type != OBU_IPC_NOP && msg->source_monotonic_us != 0 &&
+           now >= msg->source_monotonic_us && now - msg->source_monotonic_us > IPC_SLAVE_STALE_TX_US;
 }
 
 static void master_task(void *arg)
@@ -243,14 +265,10 @@ static void master_task(void *arg)
             continue;
         }
 
-        /*
-         * The prototype has no DATA_READY wire. A slave response can only be
-         * loaded after the transaction that delivered the request has finished,
-         * so waiting for the normal 20 ms poll interval on every follow-up adds
-         * roughly 40-60 ms to request/response RTT. After an application message
-         * is sent, issue a few closely spaced NOP polls to fetch the queued C5
-         * response without changing the normal idle bus load.
-         */
+        /* Without a DATA_READY wire, a slave response can only be loaded after
+         * the transaction that delivered the request has completed. Follow an
+         * application request with a short burst of NOP polls so responses such
+         * as clock probes are collected in milliseconds instead of 40-60 ms. */
         if (response_burst && !outbound && !ready && !periodic) {
             vTaskDelay(pdMS_TO_TICKS(IPC_RESPONSE_BURST_DELAY_MS));
         }
@@ -306,7 +324,29 @@ static void slave_task(void *arg)
     for (;;) {
         obu_ipc_message_t *msg = &ep->tx_scratch;
         prepare_nop(msg, nop_sequence++);
-        const bool have_message = xQueueReceive(ep->txq, msg, 0) == pdTRUE;
+
+        /* Boot order is intentionally irrelevant. Until the master has recently
+         * produced a valid frame, keep a NOP transaction armed and leave queued
+         * application data untouched. Once the master appears/reappears, discard
+         * messages older than the live-link window rather than replaying backlog. */
+        const uint64_t now = (uint64_t)esp_timer_get_time();
+        bool have_message = false;
+        if (slave_peer_fresh(ep, now)) {
+            while (xQueueReceive(ep->txq, msg, 0) == pdTRUE) {
+                if (!slave_message_stale(msg, now)) {
+                    have_message = true;
+                    break;
+                }
+                ep->stale_tx_drops++;
+                if (ep->stale_tx_drops == 1u || (ep->stale_tx_drops % 100u) == 0u) {
+                    ESP_LOGW(TAG, "C5-slave dropping stale queued message type=%u age=%llu ms stale_tx=%u",
+                             (unsigned)msg->type,
+                             (unsigned long long)((now - msg->source_monotonic_us) / 1000ULL),
+                             (unsigned)ep->stale_tx_drops);
+                }
+                prepare_nop(msg, nop_sequence++);
+            }
+        }
         set_data_ready(ep, have_message ? 1 : 0);
 
         memset(tx, 0, sizeof(tx));
