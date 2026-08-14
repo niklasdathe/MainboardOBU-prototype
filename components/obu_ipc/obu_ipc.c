@@ -6,13 +6,10 @@
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
 #include "driver/spi_slave.h"
-#include "esp_check.h"
 #include "esp_timer.h"
 #include "freertos/task.h"
 
 #define HDR_LEN 32u
-
-static const char *TAG = "obu_ipc";
 
 struct obu_ipc_endpoint {
     obu_ipc_config_t cfg;
@@ -293,12 +290,12 @@ esp_err_t obu_ipc_init(const obu_ipc_config_t *cfg, obu_ipc_endpoint_t **out)
             goto fail;
         }
 
-        gpio_config_t gpio_config = {
+        gpio_config_t gpio_cfg = {
             .pin_bit_mask = 1ULL << cfg->gpio_data_ready,
             .mode = GPIO_MODE_INPUT,
             .pull_down_en = GPIO_PULLDOWN_ENABLE,
         };
-        err = gpio_config(&gpio_config);
+        err = gpio_config(&gpio_cfg);
         if (err != ESP_OK) {
             goto fail;
         }
@@ -326,11 +323,11 @@ esp_err_t obu_ipc_init(const obu_ipc_config_t *cfg, obu_ipc_endpoint_t **out)
             goto fail;
         }
 
-        gpio_config_t gpio_config = {
+        gpio_config_t gpio_cfg = {
             .pin_bit_mask = 1ULL << cfg->gpio_data_ready,
             .mode = GPIO_MODE_OUTPUT,
         };
-        err = gpio_config(&gpio_config);
+        err = gpio_config(&gpio_cfg);
         if (err != ESP_OK) {
             goto fail;
         }
