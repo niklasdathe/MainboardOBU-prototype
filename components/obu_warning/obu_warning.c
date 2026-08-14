@@ -119,7 +119,7 @@ static void buzzer_task(void *arg)
             continue;
         }
 
-        if (ledc_set_freq(LEDC_LOW_SPEED_MODE, LEDC_TIMER_0, pattern.frequency_hz) == 0) {
+        if (ledc_set_freq(LEDC_LOW_SPEED_MODE, LEDC_TIMER_0, pattern.frequency_hz) != ESP_OK) {
             continue;
         }
         if (ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 512) != ESP_OK ||
