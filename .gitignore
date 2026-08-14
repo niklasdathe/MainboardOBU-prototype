@@ -1,0 +1,6 @@
+build/
+firmware/*/build/
+sdkconfig
+firmware/*/sdkconfig
+*.pcap
+.DS_Store

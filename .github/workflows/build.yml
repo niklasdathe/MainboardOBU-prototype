@@ -1,0 +1,29 @@
+name: ESP-IDF build
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-c5:
+    runs-on: ubuntu-latest
+    container: espressif/idf:release-v5.5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build ESP32-C5 firmware
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          idf.py -C firmware/c5 set-target esp32c5
+          idf.py -C firmware/c5 build
+
+  build-s3:
+    runs-on: ubuntu-latest
+    container: espressif/idf:release-v5.5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build ESP32-S3 firmware
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          idf.py -C firmware/s3 set-target esp32s3
+          idf.py -C firmware/s3 build

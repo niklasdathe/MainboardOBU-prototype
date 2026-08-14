@@ -1,0 +1,26 @@
+name: xiao-s3-round-display-carrier-planned
+mcu: xiao-esp32-s3
+notes:
+  - Logical HMI interface is ready; this profile documents the carrier requirement only.
+  - Do not connect this together with the default L76K/C5 wiring without re-routing.
+buses:
+  display_spi:
+    kind: spi
+    pins: {sck: D8, miso: D9, mosi: D10}
+    shared: true
+  i2c0:
+    kind: i2c
+    pins: {sda: D4, scl: D5}
+    shared: true
+devices:
+  round_display:
+    bus: display_spi
+    pins: {cs: D1, dc: D3, sd_cs: D2, backlight: D6, touch_irq: D7}
+  round_rtc:
+    bus: i2c0
+    address: 0x51
+reserved_conflicts:
+  l76k_direct_stack:
+    reason: L76K uses D6/D7 UART in the Seeed example.
+  c5_default_link:
+    reason: default prototype C5 data_ready uses D11; retain or re-route it on the carrier.

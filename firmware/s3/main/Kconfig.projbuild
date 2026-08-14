@@ -1,0 +1,14 @@
+menu "BicycleOBU prototype"
+config OBU_OTM_DIRECT_ENABLE
+    bool "Enable direct OpenTrafficMap Wi-Fi uploader"
+    default n
+config OBU_WIFI_SSID
+    string "Development Wi-Fi SSID"
+    default ""
+config OBU_WIFI_PASSWORD
+    string "Development Wi-Fi password"
+    default ""
+config OBU_OTM_NODE_ID
+    string "OpenTrafficMap node id"
+    default "bicycleobu-prototype"
+endmenu

@@ -1,0 +1,41 @@
+name: xiao-s3-expansion-base-prototype
+mcu: xiao-esp32-s3
+notes:
+  - Direct stacking of the Seeed CAN board is not allowed while L76K uses D7.
+  - SPI is intentionally shared by SD and C5; each device has a separate chip select.
+buses:
+  i2c0:
+    kind: i2c
+    pins: {sda: D4, scl: D5}
+    shared: true
+  spi2:
+    kind: spi
+    pins: {sck: D8, miso: D9, mosi: D10}
+    shared: true
+  gnss_uart:
+    kind: uart
+    pins: {tx: D6, rx: D7}
+    shared: false
+devices:
+  expansion_oled:
+    bus: i2c0
+    address: 0x3c
+  expansion_rtc_pcf8563:
+    bus: i2c0
+    address: 0x51
+  expansion_sd:
+    bus: spi2
+    pins: {cs: D2}
+  expansion_buzzer:
+    pins: {signal: D3}
+  c5_spi:
+    bus: spi2
+    pins: {cs: D0, data_ready: D11}
+  l76k:
+    bus: gnss_uart
+    pins: {pps_carrier: D12}
+reserved_conflicts:
+  xiao_can_expansion:
+    reason: MCP2515 CS is D7 on the unmodified Seeed board, colliding with L76K RX.
+  xiao_round_display:
+    reason: Round Display consumes additional D1/D2/D3/D6/D7 signals; use the carrier profile instead.
