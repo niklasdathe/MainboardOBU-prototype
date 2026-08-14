@@ -21,30 +21,95 @@ struct obu_otm {
     bool mqtt_started;
     char topic[96];
     char status[96];
+    char broker_uri[128];
+    char wifi_ssid[33];
     esp_mqtt_client_handle_t mqtt;
     uint32_t attempted;
     uint32_t successful;
     uint32_t drops;
     uint32_t errors;
+    uint32_t wifi_connect_attempts;
+    uint32_t wifi_disconnects;
+    uint32_t mqtt_connects;
+    uint32_t mqtt_errors;
 };
+
+static void log_wifi_link(void)
+{
+    wifi_ap_record_t ap = {0};
+    const esp_err_t err = esp_wifi_sta_get_ap_info(&ap);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Wi-Fi link: RSSI=%d dBm channel=%u authmode=%u BSSID=%02x:%02x:%02x:%02x:%02x:%02x",
+                 (int)ap.rssi,
+                 (unsigned)ap.primary,
+                 (unsigned)ap.authmode,
+                 ap.bssid[0], ap.bssid[1], ap.bssid[2], ap.bssid[3], ap.bssid[4], ap.bssid[5]);
+    } else {
+        ESP_LOGW(TAG, "Unable to read Wi-Fi AP info: %s", esp_err_to_name(err));
+    }
+}
+
+static void log_mqtt_error(esp_mqtt_event_handle_t event, struct obu_otm *o)
+{
+    o->mqtt_errors++;
+    o->errors++;
+    if (event == NULL || event->error_handle == NULL) {
+        ESP_LOGE(TAG, "MQTT error #%u without error_handle", (unsigned)o->mqtt_errors);
+        return;
+    }
+
+    const esp_mqtt_error_codes_t *err = event->error_handle;
+    if (err->error_type == MQTT_ERROR_TYPE_TCP_TRANSPORT) {
+        ESP_LOGE(TAG,
+                 "MQTT TCP/TLS error #%u: esp_tls=0x%x (%s) tls_stack=0x%x cert_flags=0x%x socket_errno=%d (%s)",
+                 (unsigned)o->mqtt_errors,
+                 (unsigned)err->esp_tls_last_esp_err,
+                 esp_err_to_name(err->esp_tls_last_esp_err),
+                 (unsigned)err->esp_tls_stack_err,
+                 (unsigned)err->esp_tls_cert_verify_flags,
+                 err->esp_transport_sock_errno,
+                 err->esp_transport_sock_errno != 0 ? strerror(err->esp_transport_sock_errno) : "none");
+    } else if (err->error_type == MQTT_ERROR_TYPE_CONNECTION_REFUSED) {
+        ESP_LOGE(TAG, "MQTT broker refused connection #%u: return_code=0x%x",
+                 (unsigned)o->mqtt_errors, (unsigned)err->connect_return_code);
+    } else {
+        ESP_LOGE(TAG, "MQTT error #%u: error_type=%u",
+                 (unsigned)o->mqtt_errors, (unsigned)err->error_type);
+    }
+    ESP_LOGI(TAG, "MQTT diagnostic context: broker=%s wifi_ready=%s mqtt_started=%s connects=%u disconnects=%u",
+             o->broker_uri,
+             o->wifi_ready ? "yes" : "no",
+             o->mqtt_started ? "yes" : "no",
+             (unsigned)o->mqtt_connects,
+             (unsigned)o->wifi_disconnects);
+    log_wifi_link();
+}
 
 static void mqtt_evt(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)base;
-    (void)data;
     struct obu_otm *o = arg;
     if (o == NULL) return;
+    esp_mqtt_event_handle_t event = (esp_mqtt_event_handle_t)data;
 
-    if (id == MQTT_EVENT_CONNECTED) {
+    if (id == MQTT_EVENT_BEFORE_CONNECT) {
+        ESP_LOGI(TAG, "OpenTrafficMap MQTT attempting connection to %s", o->broker_uri);
+    } else if (id == MQTT_EVENT_CONNECTED) {
         o->mqtt_ready = true;
-        ESP_LOGI(TAG, "OpenTrafficMap MQTT connected");
-        (void)esp_mqtt_client_publish(o->mqtt, o->status, "online", 0, 0, 1);
+        o->mqtt_connects++;
+        ESP_LOGI(TAG, "OpenTrafficMap MQTT connected (connection #%u)", (unsigned)o->mqtt_connects);
+        const int msg_id = esp_mqtt_client_publish(o->mqtt, o->status, "online", 0, 0, 1);
+        ESP_LOGI(TAG, "Published OTM online status: topic=%s msg_id=%d", o->status, msg_id);
     } else if (id == MQTT_EVENT_DISCONNECTED) {
         o->mqtt_ready = false;
-        ESP_LOGW(TAG, "OpenTrafficMap MQTT disconnected");
+        ESP_LOGW(TAG, "OpenTrafficMap MQTT disconnected; client will retry while Wi-Fi remains available");
     } else if (id == MQTT_EVENT_ERROR) {
         o->mqtt_ready = false;
-        ESP_LOGW(TAG, "OpenTrafficMap MQTT transport error");
+        log_mqtt_error(event, o);
+    } else if (id == MQTT_EVENT_PUBLISHED && event != NULL) {
+        ESP_LOGD(TAG, "MQTT publish acknowledged msg_id=%d", event->msg_id);
+    } else {
+        ESP_LOGD(TAG, "MQTT event id=%ld", (long)id);
     }
 }
 
@@ -52,10 +117,10 @@ static void start_mqtt_after_ip(struct obu_otm *o)
 {
     if (o == NULL || o->mqtt == NULL || o->mqtt_started || !o->wifi_ready) return;
 
+    ESP_LOGI(TAG, "Wi-Fi has IP; starting OpenTrafficMap MQTT client for %s", o->broker_uri);
     const esp_err_t err = esp_mqtt_client_start(o->mqtt);
     if (err == ESP_OK) {
         o->mqtt_started = true;
-        ESP_LOGI(TAG, "Wi-Fi has IP; starting OpenTrafficMap MQTT client");
     } else {
         o->errors++;
         ESP_LOGE(TAG, "Failed to start OpenTrafficMap MQTT client: %s", esp_err_to_name(err));
@@ -64,26 +129,45 @@ static void start_mqtt_after_ip(struct obu_otm *o)
 
 static void wifi_evt(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
-    (void)data;
     struct obu_otm *o = arg;
     if (o == NULL) return;
 
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
+        o->wifi_connect_attempts++;
+        ESP_LOGI(TAG, "Wi-Fi STA started; connecting to SSID '%s' (attempt #%u)",
+                 o->wifi_ssid, (unsigned)o->wifi_connect_attempts);
         const esp_err_t err = esp_wifi_connect();
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "Wi-Fi connect request failed: %s", esp_err_to_name(err));
-        }
+        if (err != ESP_OK) ESP_LOGW(TAG, "Wi-Fi connect request failed: %s", esp_err_to_name(err));
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_CONNECTED) {
+        ESP_LOGI(TAG, "Wi-Fi associated with SSID '%s'; waiting for DHCP/IP", o->wifi_ssid);
+        log_wifi_link();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         o->wifi_ready = false;
         o->mqtt_ready = false;
-        ESP_LOGW(TAG, "Wi-Fi disconnected; reconnecting");
-        const esp_err_t err = esp_wifi_connect();
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "Wi-Fi reconnect request failed: %s", esp_err_to_name(err));
+        o->wifi_disconnects++;
+        const wifi_event_sta_disconnected_t *disc = (const wifi_event_sta_disconnected_t *)data;
+        if (disc != NULL) {
+            ESP_LOGW(TAG, "Wi-Fi disconnected #%u: reason=%u RSSI=%d; reconnecting",
+                     (unsigned)o->wifi_disconnects, (unsigned)disc->reason, (int)disc->rssi);
+        } else {
+            ESP_LOGW(TAG, "Wi-Fi disconnected #%u; reconnecting", (unsigned)o->wifi_disconnects);
         }
+        o->wifi_connect_attempts++;
+        const esp_err_t err = esp_wifi_connect();
+        if (err != ESP_OK) ESP_LOGW(TAG, "Wi-Fi reconnect request failed: %s", esp_err_to_name(err));
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         o->wifi_ready = true;
-        ESP_LOGI(TAG, "Wi-Fi acquired IP address");
+        const ip_event_got_ip_t *got = (const ip_event_got_ip_t *)data;
+        if (got != NULL) {
+            ESP_LOGI(TAG, "Wi-Fi acquired IP: " IPSTR " netmask=" IPSTR " gateway=" IPSTR " changed=%s",
+                     IP2STR(&got->ip_info.ip),
+                     IP2STR(&got->ip_info.netmask),
+                     IP2STR(&got->ip_info.gw),
+                     got->ip_changed ? "yes" : "no");
+        } else {
+            ESP_LOGI(TAG, "Wi-Fi acquired IP address");
+        }
+        log_wifi_link();
         start_mqtt_after_ip(o);
     }
 }
@@ -97,20 +181,28 @@ esp_err_t obu_otm_wifi_start(const obu_otm_wifi_config_t *c, obu_otm_t **out)
     o->enabled = c->enabled;
 
     if (!c->enabled) {
+        ESP_LOGI(TAG, "Direct OpenTrafficMap Wi-Fi uploader disabled");
         *out = o;
         return ESP_OK;
     }
-    if (c->wifi_ssid == NULL || c->wifi_ssid[0] == '\0' ||
-        c->node_id == NULL || c->node_id[0] == '\0') {
+    if (c->wifi_ssid == NULL || c->wifi_ssid[0] == '\0' || c->node_id == NULL || c->node_id[0] == '\0') {
+        ESP_LOGE(TAG, "OTM uploader enabled but SSID or node ID is empty");
         free(o);
         return ESP_ERR_INVALID_ARG;
     }
 
     snprintf(o->topic, sizeof(o->topic), "its/%s/packet", c->node_id);
     snprintf(o->status, sizeof(o->status), "its/%s/status", c->node_id);
+    snprintf(o->broker_uri, sizeof(o->broker_uri), "%s",
+             c->broker_uri != NULL ? c->broker_uri : "mqtts://cits1.opentrafficmap.org:8883");
+    snprintf(o->wifi_ssid, sizeof(o->wifi_ssid), "%s", c->wifi_ssid);
+
+    ESP_LOGI(TAG, "OTM direct uploader config: SSID='%s' broker='%s' node='%s' packet_topic='%s'",
+             o->wifi_ssid, o->broker_uri, c->node_id, o->topic);
 
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_LOGW(TAG, "NVS needs erase/reinitialize: %s", esp_err_to_name(err));
         err = nvs_flash_erase();
         if (err != ESP_OK) {
             free(o);
@@ -149,9 +241,7 @@ esp_err_t obu_otm_wifi_start(const obu_otm_wifi_config_t *c, obu_otm_t **out)
 
     wifi_config_t wc = {0};
     strncpy((char *)wc.sta.ssid, c->wifi_ssid, sizeof(wc.sta.ssid) - 1);
-    if (c->wifi_password != NULL) {
-        strncpy((char *)wc.sta.password, c->wifi_password, sizeof(wc.sta.password) - 1);
-    }
+    if (c->wifi_password != NULL) strncpy((char *)wc.sta.password, c->wifi_password, sizeof(wc.sta.password) - 1);
 
     err = esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_evt, o);
     if (err != ESP_OK) return err;
@@ -159,7 +249,7 @@ esp_err_t obu_otm_wifi_start(const obu_otm_wifi_config_t *c, obu_otm_t **out)
     if (err != ESP_OK) return err;
 
     esp_mqtt_client_config_t mc = {
-        .broker.address.uri = c->broker_uri != NULL ? c->broker_uri : "mqtts://cits1.opentrafficmap.org:8883",
+        .broker.address.uri = o->broker_uri,
         .broker.verification.crt_bundle_attach = esp_crt_bundle_attach,
         .session.last_will.topic = o->status,
         .session.last_will.msg = "offline",
@@ -177,11 +267,6 @@ esp_err_t obu_otm_wifi_start(const obu_otm_wifi_config_t *c, obu_otm_t **out)
     err = esp_wifi_set_config(WIFI_IF_STA, &wc);
     if (err != ESP_OK) return err;
 
-    /*
-     * Start Wi-Fi last. MQTT is deliberately not started here: DNS/TLS needs
-     * a valid IP route. The IP_EVENT_STA_GOT_IP handler starts MQTT once the
-     * station has actually acquired an address.
-     */
     err = esp_wifi_start();
     if (err != ESP_OK) return err;
 
@@ -200,15 +285,25 @@ esp_err_t obu_otm_publish_live_frame(obu_otm_t *o, const uint8_t *f, size_t n)
     if (!o->mqtt_ready) {
         o->drops++;
         o->errors++;
+        if (o->drops == 1u || (o->drops % 100u) == 0u) {
+            ESP_LOGW(TAG, "Dropping OTM frame while MQTT disconnected: dropped=%u len=%u",
+                     (unsigned)o->drops, (unsigned)n);
+        }
         return ESP_ERR_INVALID_STATE;
     }
 
     int id = esp_mqtt_client_publish(o->mqtt, o->topic, (const char *)f, (int)n, 0, 0);
     if (id < 0) {
         o->errors++;
+        ESP_LOGE(TAG, "OTM publish failed: len=%u attempted=%u errors=%u",
+                 (unsigned)n, (unsigned)o->attempted, (unsigned)o->errors);
         return ESP_FAIL;
     }
     o->successful++;
+    if (o->successful == 1u || (o->successful % 100u) == 0u) {
+        ESP_LOGI(TAG, "OTM frames published=%u attempted=%u last_len=%u msg_id=%d",
+                 (unsigned)o->successful, (unsigned)o->attempted, (unsigned)n, id);
+    }
     return ESP_OK;
 }
 
