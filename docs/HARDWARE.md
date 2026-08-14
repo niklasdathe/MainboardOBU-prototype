@@ -10,10 +10,26 @@ The default S3 profile is `config/hardware/prototype-expansion-base.yaml`. It tr
 | PCF8563 RTC | D4/D5 | GPIO5/GPIO6 | `obu_time_service_t` |
 | microSD | D8/D9/D10 + D2 CS | GPIO7/GPIO8/GPIO9 + GPIO3 CS | `obu_diag_logger` |
 | Passive buzzer | A3/D3 | GPIO4 | `obu_warning_output_t` |
+| Expansion Base user button | D1 | GPIO2 | reserved by Expansion Base |
 | C5 chip select | D0 | GPIO1 | `obu_ipc` |
-| C5 DATA_READY | D11 | GPIO42 | `obu_ipc` |
 | GNSS PPS carrier signal | D12 | GPIO41 | `obu_time_service_t` |
 | L76K UART | D6/D7 | GPIO43/GPIO44 | `obu_l76k` |
+
+## C5-to-S3 wiring
+
+The prototype uses the S3 as SPI master and the C5 as SPI slave at 8 MHz. The C5 link shares the S3 SPI bus with the Expansion Base microSD card, using a separate chip-select line.
+
+| Signal | XIAO ESP32-S3 | XIAO ESP32-C5 |
+|---|---|---|
+| SCK | D8 / GPIO7 | D8 / GPIO8 |
+| MISO | D9 / GPIO8 | D9 / GPIO9 |
+| MOSI | D10 / GPIO9 | D10 / GPIO10 |
+| C5 CS | D0 / GPIO1 | D0 / GPIO1 |
+| Ground | GND | GND |
+
+No `DATA_READY` wire is required in the default prototype profile. The S3 polls the SPI slave at a maximum interval of 20 ms and also initiates a transaction immediately when it has outbound data. This avoids using S3 GPIO42/D11, which is not on the normal XIAO side header, and avoids D1, which is already connected to the Expansion Base user button.
+
+The IPC abstraction still supports an optional dedicated `DATA_READY` GPIO for a future carrier PCB: set `gpio_data_ready` to a non-negative GPIO number on both endpoints. The default Expansion Base build sets it to `-1` on both MCUs.
 
 ## Local warning buzzer
 
@@ -27,7 +43,7 @@ Audible output can be disabled at build time or muted at runtime. Buzzer initial
 
 The L76K prototype uses D6/D7 for UART. The unmodified Seeed XIAO CAN expansion uses D7 as MCP2515 chip select, so that board cannot be blindly stacked with the selected GNSS wiring. A carrier PCB must reroute the CAN chip select or select a different interface assignment.
 
-The XIAO Round Display also consumes several signals used by the Expansion Base profile. Use `config/hardware/round-display-carrier.yaml` and a deliberate carrier design rather than assuming the two profiles are physically stack-compatible.
+D1 is intentionally left to the Expansion Base user button and must not be driven by the C5. The XIAO Round Display also consumes several signals used by the Expansion Base profile. Use `config/hardware/round-display-carrier.yaml` and a deliberate carrier design rather than assuming the two profiles are physically stack-compatible.
 
 Validate a profile before changing firmware pin constants:
 

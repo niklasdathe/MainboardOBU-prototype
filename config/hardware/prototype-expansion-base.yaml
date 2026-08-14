@@ -3,6 +3,8 @@ mcu: xiao-esp32-s3
 notes:
   - Direct stacking of the Seeed CAN board is not allowed while L76K uses D7.
   - SPI is intentionally shared by SD and C5; each device has a separate chip select.
+  - The C5 link uses 20 ms master polling and therefore does not require a DATA_READY wire.
+  - D1 is occupied by the Expansion Base user button and is not assigned to the C5 link.
 buses:
   i2c0:
     kind: i2c
@@ -28,9 +30,11 @@ devices:
     pins: {cs: D2}
   expansion_buzzer:
     pins: {signal: D3}
+  expansion_user_button:
+    pins: {signal: D1}
   c5_spi:
     bus: spi2
-    pins: {cs: D0, data_ready: D11}
+    pins: {cs: D0}
   l76k:
     bus: gnss_uart
     pins: {pps_carrier: D12}

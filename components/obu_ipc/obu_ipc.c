@@ -10,6 +10,7 @@
 #include "freertos/task.h"
 
 #define HDR_LEN 32u
+#define IPC_POLL_INTERVAL_MS 20u
 
 struct obu_ipc_endpoint {
     obu_ipc_config_t cfg;
@@ -155,6 +156,18 @@ static void enqueue_rx(obu_ipc_endpoint_t *ep, const uint8_t *buf, size_t len)
     }
 }
 
+static bool data_ready_enabled(const obu_ipc_endpoint_t *ep)
+{
+    return ep->cfg.gpio_data_ready >= 0;
+}
+
+static void set_data_ready(obu_ipc_endpoint_t *ep, int level)
+{
+    if (data_ready_enabled(ep)) {
+        gpio_set_level(ep->cfg.gpio_data_ready, level);
+    }
+}
+
 static void master_task(void *arg)
 {
     obu_ipc_endpoint_t *ep = arg;
@@ -165,9 +178,9 @@ static void master_task(void *arg)
 
     for (;;) {
         const bool outbound = uxQueueMessagesWaiting(ep->txq) > 0;
-        const bool ready = gpio_get_level(ep->cfg.gpio_data_ready) != 0;
+        const bool ready = data_ready_enabled(ep) && gpio_get_level(ep->cfg.gpio_data_ready) != 0;
         const TickType_t now_tick = xTaskGetTickCount();
-        const bool periodic = (now_tick - last_poll) >= pdMS_TO_TICKS(20);
+        const bool periodic = (now_tick - last_poll) >= pdMS_TO_TICKS(IPC_POLL_INTERVAL_MS);
         if (!outbound && !ready && !periodic) {
             vTaskDelay(pdMS_TO_TICKS(2));
             continue;
@@ -215,13 +228,13 @@ static void slave_task(void *arg)
             .source_monotonic_us = (uint64_t)esp_timer_get_time(),
         };
         const bool have_message = xQueueReceive(ep->txq, &msg, 0) == pdTRUE;
-        gpio_set_level(ep->cfg.gpio_data_ready, have_message ? 1 : 0);
+        set_data_ready(ep, have_message ? 1 : 0);
 
         memset(tx, 0, sizeof(tx));
         memset(rx, 0, sizeof(rx));
         size_t used = 0;
         if (obu_ipc_encode(&msg, tx, sizeof(tx), &used) != ESP_OK) {
-            gpio_set_level(ep->cfg.gpio_data_ready, 0);
+            set_data_ready(ep, 0);
             continue;
         }
 
@@ -231,7 +244,7 @@ static void slave_task(void *arg)
             .rx_buffer = rx,
         };
         const esp_err_t err = spi_slave_transmit(ep->cfg.host, &transaction, portMAX_DELAY);
-        gpio_set_level(ep->cfg.gpio_data_ready, 0);
+        set_data_ready(ep, 0);
         if (err == ESP_OK) {
             enqueue_rx(ep, rx, sizeof(rx));
         }
@@ -290,14 +303,16 @@ esp_err_t obu_ipc_init(const obu_ipc_config_t *cfg, obu_ipc_endpoint_t **out)
             goto fail;
         }
 
-        gpio_config_t gpio_cfg = {
-            .pin_bit_mask = 1ULL << cfg->gpio_data_ready,
-            .mode = GPIO_MODE_INPUT,
-            .pull_down_en = GPIO_PULLDOWN_ENABLE,
-        };
-        err = gpio_config(&gpio_cfg);
-        if (err != ESP_OK) {
-            goto fail;
+        if (data_ready_enabled(ep)) {
+            gpio_config_t gpio_cfg = {
+                .pin_bit_mask = 1ULL << cfg->gpio_data_ready,
+                .mode = GPIO_MODE_INPUT,
+                .pull_down_en = GPIO_PULLDOWN_ENABLE,
+            };
+            err = gpio_config(&gpio_cfg);
+            if (err != ESP_OK) {
+                goto fail;
+            }
         }
 
         if (xTaskCreate(master_task, "obu_ipc_m", 8192, ep, 12, &ep->task) != pdPASS) {
@@ -323,15 +338,17 @@ esp_err_t obu_ipc_init(const obu_ipc_config_t *cfg, obu_ipc_endpoint_t **out)
             goto fail;
         }
 
-        gpio_config_t gpio_cfg = {
-            .pin_bit_mask = 1ULL << cfg->gpio_data_ready,
-            .mode = GPIO_MODE_OUTPUT,
-        };
-        err = gpio_config(&gpio_cfg);
-        if (err != ESP_OK) {
-            goto fail;
+        if (data_ready_enabled(ep)) {
+            gpio_config_t gpio_cfg = {
+                .pin_bit_mask = 1ULL << cfg->gpio_data_ready,
+                .mode = GPIO_MODE_OUTPUT,
+            };
+            err = gpio_config(&gpio_cfg);
+            if (err != ESP_OK) {
+                goto fail;
+            }
+            gpio_set_level(cfg->gpio_data_ready, 0);
         }
-        gpio_set_level(cfg->gpio_data_ready, 0);
 
         if (xTaskCreate(slave_task, "obu_ipc_s", 8192, ep, 12, &ep->task) != pdPASS) {
             err = ESP_ERR_NO_MEM;

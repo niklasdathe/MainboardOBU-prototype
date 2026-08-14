@@ -41,6 +41,7 @@ typedef struct {
     int gpio_mosi;
     int gpio_miso;
     int gpio_cs;
+    /* Optional C5->S3 wake hint. Set to -1 for polling-only SPI operation. */
     int gpio_data_ready;
     int queue_depth;
     int clock_hz;

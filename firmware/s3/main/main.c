@@ -382,7 +382,7 @@ void app_main(void)
         .gpio_miso = 8,
         .gpio_mosi = 9,
         .gpio_cs = 1,
-        .gpio_data_ready = 42,
+        .gpio_data_ready = -1,
         .queue_depth = 12,
         .clock_hz = 8000000,
         .bus_already_initialized = true,

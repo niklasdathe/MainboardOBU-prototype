@@ -33,7 +33,7 @@ Source review and a successful firmware build are not complete-system validation
 ```mermaid
 flowchart LR
     AIR[ITS-G5 / IEEE 802.11p] <--> C5[ESP32-C5\nradio endpoint]
-    C5 <--> |Versioned CRC SPI| S3[ESP32-S3\nembedded hub]
+    C5 <--> |8 MHz versioned CRC SPI| S3[ESP32-S3\nembedded hub]
 
     GNSS[L76K GNSS] --> S3
     RTC[PCF8563 RTC] <--> S3
@@ -60,8 +60,11 @@ The display and buzzer are consumers of the S3 data model, not owners of warning
 | RTC | Expansion Base PCF8563 | shared I²C D4/D5 |
 | Diagnostic storage | Expansion Base microSD | SPI D8/D9/D10, CS D2 |
 | Audible warnings | Expansion Base passive buzzer | A3/D3 = GPIO4 |
+| Expansion Base user button | onboard button | D1 = GPIO2; reserved by the base |
 | GNSS | XIAO L76K | UART D6/D7; PPS reserved on D12 |
-| C5 link | XIAO ESP32-C5 | shared SPI, CS D0, DATA_READY D11 |
+| C5 link | XIAO ESP32-C5 | SPI D8/D9/D10, CS D0; no DATA_READY wire |
+
+The default C5 link is polling-only: the S3 polls the C5 at most every 20 ms and initiates transactions immediately for outbound messages. This removes the former GPIO42/D11 `DATA_READY` connection and deliberately leaves D1 to the Expansion Base user button. A future carrier may enable an optional dedicated `DATA_READY` GPIO through `obu_ipc`.
 
 The unmodified XIAO CAN expansion uses D7 as MCP2515 CS, which conflicts with the selected L76K UART profile. Use a carrier/rerouted CS rather than blind stacking when both are fitted.
 
