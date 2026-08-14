@@ -39,6 +39,16 @@ static uint32_t ipc_seq;
 static QueueHandle_t pps_queue;
 static QueueHandle_t event_queue;
 
+/*
+ * IPC messages and bus events contain ~2.5 KiB payload arrays. Keep the
+ * long-lived task scratch objects in static storage instead of placing them
+ * on the comparatively small FreeRTOS task stacks.
+ */
+static obu_ipc_message_t main_ipc_rx;
+static obu_ipc_message_t time_probe_message;
+static obu_event_t main_event_scratch;
+static obu_event_t event_consumer_scratch;
+
 typedef struct __attribute__((packed)) {
     obu_v2x_rx_meta_t meta;
     uint16_t frame_len;
@@ -93,6 +103,12 @@ static void stamp_event_utc(obu_event_t *e)
     (void)obu_time_now(&timesvc, mono, &e->utc_ns, &e->time_quality);
 }
 
+static obu_event_t *prepare_main_event(void)
+{
+    memset(&main_event_scratch, 0, sizeof(main_event_scratch));
+    return &main_event_scratch;
+}
+
 static void publish_clock_status(void)
 {
     obu_clock_sync_status_t st;
@@ -104,18 +120,18 @@ static void publish_clock_status(void)
         .valid = c5_clock.valid,
     };
     portEXIT_CRITICAL(&c5_clock.lock);
-    obu_event_t e = {
-        .source = OBU_SOURCE_SYSTEM,
-        .type = OBU_DATA_CLOCK_SYNC,
-        .sequence = seq++,
-        .flags = st.valid ? OBU_EVENT_F_VALID : 0,
-        .source_monotonic_us = obu_monotonic_us(),
-        .payload_len = sizeof(st),
-    };
-    e.hub_monotonic_us = e.source_monotonic_us;
-    memcpy(e.payload, &st, sizeof(st));
-    stamp_event_utc(&e);
-    (void)obu_bus_publish(&bus, &e);
+
+    obu_event_t *e = prepare_main_event();
+    e->source = OBU_SOURCE_SYSTEM;
+    e->type = OBU_DATA_CLOCK_SYNC;
+    e->sequence = seq++;
+    e->flags = st.valid ? OBU_EVENT_F_VALID : 0;
+    e->source_monotonic_us = obu_monotonic_us();
+    e->hub_monotonic_us = e->source_monotonic_us;
+    e->payload_len = sizeof(st);
+    memcpy(e->payload, &st, sizeof(st));
+    stamp_event_utc(e);
+    (void)obu_bus_publish(&bus, e);
 }
 
 static void ingest_ipc(const obu_ipc_message_t *m)
@@ -124,52 +140,52 @@ static void ingest_ipc(const obu_ipc_message_t *m)
         rx_wire_t w;
         memcpy(&w, m->payload, sizeof(w));
         if (sizeof(w) + w.frame_len > m->payload_len) return;
-        obu_event_t e = {
-            .source = OBU_SOURCE_C5_RADIO,
-            .type = OBU_DATA_V2X_RAW_RX,
-            .sequence = seq++,
-            .flags = OBU_EVENT_F_RAW | OBU_EVENT_F_VALID,
-            .source_monotonic_us = w.meta.c5_rx_monotonic_us,
-            .hub_monotonic_us = c5_to_s3_monotonic(w.meta.c5_rx_monotonic_us),
-            .validity_ms = 0,
-        };
+
         size_t total = sizeof(w.meta) + w.frame_len;
         if (total > OBU_EVENT_PAYLOAD_MAX) return;
-        e.payload_len = (uint16_t)total;
-        memcpy(e.payload, &w.meta, sizeof(w.meta));
-        memcpy(e.payload + sizeof(w.meta), m->payload + sizeof(w), w.frame_len);
-        stamp_event_utc(&e);
-        (void)obu_bus_publish(&bus, &e);
+
+        obu_event_t *e = prepare_main_event();
+        e->source = OBU_SOURCE_C5_RADIO;
+        e->type = OBU_DATA_V2X_RAW_RX;
+        e->sequence = seq++;
+        e->flags = OBU_EVENT_F_RAW | OBU_EVENT_F_VALID;
+        e->source_monotonic_us = w.meta.c5_rx_monotonic_us;
+        e->hub_monotonic_us = c5_to_s3_monotonic(w.meta.c5_rx_monotonic_us);
+        e->validity_ms = 0;
+        e->payload_len = (uint16_t)total;
+        memcpy(e->payload, &w.meta, sizeof(w.meta));
+        memcpy(e->payload + sizeof(w.meta), m->payload + sizeof(w), w.frame_len);
+        stamp_event_utc(e);
+        (void)obu_bus_publish(&bus, e);
         if (otm) (void)obu_otm_publish_live_frame(otm, m->payload + sizeof(w), w.frame_len);
     } else if (m->type == OBU_IPC_RADIO_STATUS && m->payload_len >= sizeof(obu_radio_status_t)) {
         obu_radio_status_t s;
         memcpy(&s, m->payload, sizeof(s));
         hmi.c5_online = s.radio_running;
-        obu_event_t e = {
-            .source = OBU_SOURCE_C5_RADIO,
-            .type = OBU_DATA_RADIO_STATUS,
-            .sequence = seq++,
-            .flags = OBU_EVENT_F_VALID,
-            .source_monotonic_us = m->source_monotonic_us,
-            .hub_monotonic_us = c5_to_s3_monotonic(m->source_monotonic_us),
-            .payload_len = sizeof(s),
-        };
-        memcpy(e.payload, &s, sizeof(s));
-        stamp_event_utc(&e);
-        (void)obu_bus_publish(&bus, &e);
+
+        obu_event_t *e = prepare_main_event();
+        e->source = OBU_SOURCE_C5_RADIO;
+        e->type = OBU_DATA_RADIO_STATUS;
+        e->sequence = seq++;
+        e->flags = OBU_EVENT_F_VALID;
+        e->source_monotonic_us = m->source_monotonic_us;
+        e->hub_monotonic_us = c5_to_s3_monotonic(m->source_monotonic_us);
+        e->payload_len = sizeof(s);
+        memcpy(e->payload, &s, sizeof(s));
+        stamp_event_utc(e);
+        (void)obu_bus_publish(&bus, e);
     } else if (m->type == OBU_IPC_TX_RESULT) {
-        obu_event_t e = {
-            .source = OBU_SOURCE_C5_RADIO,
-            .type = OBU_DATA_V2X_TX_RESULT,
-            .sequence = seq++,
-            .flags = OBU_EVENT_F_VALID,
-            .source_monotonic_us = m->source_monotonic_us,
-            .hub_monotonic_us = c5_to_s3_monotonic(m->source_monotonic_us),
-            .payload_len = m->payload_len,
-        };
-        memcpy(e.payload, m->payload, m->payload_len);
-        stamp_event_utc(&e);
-        (void)obu_bus_publish(&bus, &e);
+        obu_event_t *e = prepare_main_event();
+        e->source = OBU_SOURCE_C5_RADIO;
+        e->type = OBU_DATA_V2X_TX_RESULT;
+        e->sequence = seq++;
+        e->flags = OBU_EVENT_F_VALID;
+        e->source_monotonic_us = m->source_monotonic_us;
+        e->hub_monotonic_us = c5_to_s3_monotonic(m->source_monotonic_us);
+        e->payload_len = m->payload_len;
+        memcpy(e->payload, m->payload, m->payload_len);
+        stamp_event_utc(e);
+        (void)obu_bus_publish(&bus, e);
     } else if (m->type == OBU_IPC_TIME_RESPONSE && m->payload_len >= 24) {
         uint64_t t1, t2, t3;
         memcpy(&t1, m->payload, 8);
@@ -228,16 +244,16 @@ static void event_consumer(void *arg)
 {
     (void)arg;
     for (;;) {
-        obu_event_t e;
-        if (xQueueReceive(event_queue, &e, portMAX_DELAY) != pdTRUE) continue;
-        process_gnss(&e);
-        if (!e.utc_ns) stamp_event_utc(&e);
-        if (logger && (e.type == OBU_DATA_DIAGNOSTIC || e.type == OBU_DATA_RADIO_STATUS ||
-                       e.type == OBU_DATA_V2X_TX_RESULT || e.type == OBU_DATA_CLOCK_SYNC || !(e.flags & OBU_EVENT_F_VALID))) {
-            (void)obu_diag_log_event(logger, &e, "event");
+        if (xQueueReceive(event_queue, &event_consumer_scratch, portMAX_DELAY) != pdTRUE) continue;
+        obu_event_t *e = &event_consumer_scratch;
+        process_gnss(e);
+        if (!e->utc_ns) stamp_event_utc(e);
+        if (logger && (e->type == OBU_DATA_DIAGNOSTIC || e->type == OBU_DATA_RADIO_STATUS ||
+                       e->type == OBU_DATA_V2X_TX_RESULT || e->type == OBU_DATA_CLOCK_SYNC || !(e->flags & OBU_EVENT_F_VALID))) {
+            (void)obu_diag_log_event(logger, e, "event");
         }
-        if (e.type == OBU_DATA_WARNING) {
-            process_warning(&e);
+        if (e->type == OBU_DATA_WARNING) {
+            process_warning(e);
         }
     }
 }
@@ -257,14 +273,13 @@ static void time_probe_task(void *arg)
 {
     (void)arg;
     for (;;) {
-        obu_ipc_message_t m = {
-            .type = OBU_IPC_TIME_PROBE,
-            .sequence = ipc_seq++,
-            .source_monotonic_us = obu_monotonic_us(),
-            .payload_len = 8,
-        };
-        memcpy(m.payload, &m.source_monotonic_us, 8);
-        (void)obu_ipc_send(ipc, &m, pdMS_TO_TICKS(5));
+        memset(&time_probe_message, 0, sizeof(time_probe_message));
+        time_probe_message.type = OBU_IPC_TIME_PROBE;
+        time_probe_message.sequence = ipc_seq++;
+        time_probe_message.source_monotonic_us = obu_monotonic_us();
+        time_probe_message.payload_len = 8;
+        memcpy(time_probe_message.payload, &time_probe_message.source_monotonic_us, 8);
+        (void)obu_ipc_send(ipc, &time_probe_message, pdMS_TO_TICKS(5));
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
@@ -310,18 +325,18 @@ static void publish_startup_status(void)
     const esp_app_desc_t *d = esp_app_get_description();
     char text[128];
     snprintf(text, sizeof(text), "S3 boot reset=%u fw=%s", (unsigned)esp_reset_reason(), d ? d->version : "unknown");
-    obu_event_t e = {
-        .source = OBU_SOURCE_SYSTEM,
-        .type = OBU_DATA_DIAGNOSTIC,
-        .sequence = seq++,
-        .flags = OBU_EVENT_F_VALID,
-        .source_monotonic_us = obu_monotonic_us(),
-    };
-    e.hub_monotonic_us = e.source_monotonic_us;
-    e.payload_len = (uint16_t)strnlen(text, sizeof(text));
-    memcpy(e.payload, text, e.payload_len);
-    stamp_event_utc(&e);
-    (void)obu_bus_publish(&bus, &e);
+
+    obu_event_t *e = prepare_main_event();
+    e->source = OBU_SOURCE_SYSTEM;
+    e->type = OBU_DATA_DIAGNOSTIC;
+    e->sequence = seq++;
+    e->flags = OBU_EVENT_F_VALID;
+    e->source_monotonic_us = obu_monotonic_us();
+    e->hub_monotonic_us = e->source_monotonic_us;
+    e->payload_len = (uint16_t)strnlen(text, sizeof(text));
+    memcpy(e->payload, text, e->payload_len);
+    stamp_event_utc(e);
+    (void)obu_bus_publish(&bus, e);
 }
 
 void app_main(void)
@@ -434,8 +449,18 @@ void app_main(void)
     if (display.ops != NULL && xTaskCreate(hmi_task, "hmi", 4096, NULL, 5, NULL) != pdPASS) abort();
     if (xTaskCreate(time_probe_task, "c5_clock", 3072, NULL, 8, NULL) != pdPASS) abort();
 
+    ESP_LOGI(TAG, "main minimum free stack after startup: %u bytes",
+             (unsigned)uxTaskGetStackHighWaterMark(NULL));
+
+    uint32_t stack_report_counter = 0;
     for (;;) {
-        obu_ipc_message_t m;
-        if (obu_ipc_receive(ipc, &m, pdMS_TO_TICKS(250)) == ESP_OK) ingest_ipc(&m);
+        if (obu_ipc_receive(ipc, &main_ipc_rx, pdMS_TO_TICKS(250)) == ESP_OK) {
+            ingest_ipc(&main_ipc_rx);
+        }
+        if (++stack_report_counter >= 20u) {
+            stack_report_counter = 0;
+            ESP_LOGI(TAG, "main minimum free stack: %u bytes",
+                     (unsigned)uxTaskGetStackHighWaterMark(NULL));
+        }
     }
 }
