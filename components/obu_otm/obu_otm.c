@@ -17,6 +17,16 @@
 #define OTM_MQTT_RECONNECT_TIMEOUT_MS 5000
 #define OTM_MQTT_KEEPALIVE_S 30
 
+/*
+ * obu_otm is a shared component and is compiled for both the S3 and C5
+ * firmware. The country-code Kconfig option belongs to the S3 application,
+ * where the direct Wi-Fi uplink is actually used. Keep the shared component
+ * buildable for targets which do not expose that application Kconfig symbol.
+ */
+#ifndef CONFIG_OBU_WIFI_COUNTRY_CODE
+#define CONFIG_OBU_WIFI_COUNTRY_CODE "DE"
+#endif
+
 static const char *TAG = "obu_otm";
 
 struct obu_otm {
