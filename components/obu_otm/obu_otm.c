@@ -73,8 +73,8 @@ static void log_hotspot_compatibility_hint(struct obu_otm *o, uint8_t reason)
         }
     } else if (reason == WIFI_REASON_AUTH_FAIL || reason == WIFI_REASON_HANDSHAKE_TIMEOUT) {
         ESP_LOGW(TAG,
-                 "Hotspot authentication/handshake failed (reason=%u). WPA2-Personal, WPA3-Personal and "
-                 "WPA2/WPA3 transition hotspots are supported; verify the configured hotspot password.",
+                 "Hotspot authentication/handshake failed (reason=%u). Open/OWE, WPA2-Personal, "
+                 "WPA3-Personal and transition hotspots are supported; verify the configured hotspot password.",
                  (unsigned)reason);
     }
 }
@@ -270,7 +270,7 @@ esp_err_t obu_otm_wifi_start(const obu_otm_wifi_config_t *c, obu_otm_t **out)
              o->wifi_ssid, o->broker_uri, c->node_id, o->topic);
     ESP_LOGI(TAG,
              "Hotspot compatibility mode: 2.4GHz b/g/n, country=%s with 802.11d auto-update, all-channel scan, "
-             "WPA2/WPA3 Personal, PMF capable, Wi-Fi power-save disabled, MQTT network timeout=%dms",
+             "Open/OWE + WPA2/WPA3 Personal, PMF capable, Wi-Fi power-save disabled, MQTT network timeout=%dms",
              CONFIG_OBU_WIFI_COUNTRY_CODE, OTM_MQTT_NETWORK_TIMEOUT_MS);
 #ifdef CONFIG_OBU_OTM_TLS_TRACE
     ESP_LOGW(TAG, "OpenTrafficMap TLS trace enabled; mbedTLS handshake diagnostics are active for development");
@@ -332,8 +332,8 @@ esp_err_t obu_otm_wifi_start(const obu_otm_wifi_config_t *c, obu_otm_t **out)
     if (secured_hotspot) strncpy((char *)wc.sta.password, c->wifi_password, sizeof(wc.sta.password) - 1);
 
     /* Avoid assumptions about a phone vendor's selected 2.4 GHz channel or
-     * WPA2/WPA3 transition behavior. WPA2 is the minimum for password-protected
-     * hotspots, therefore WPA3-only and WPA2/WPA3 transition APs also qualify. */
+     * WPA2/WPA3/OWE transition behavior. WPA2 is the minimum for password-
+     * protected hotspots; passwordless profiles also allow OWE/OWE transition. */
     wc.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
     wc.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
     wc.sta.channel = 0;
@@ -343,6 +343,7 @@ esp_err_t obu_otm_wifi_start(const obu_otm_wifi_config_t *c, obu_otm_t **out)
     wc.sta.pmf_cfg.capable = true;
     wc.sta.pmf_cfg.required = false;
     wc.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
+    wc.sta.owe_enabled = !secured_hotspot;
     wc.sta.failure_retry_cnt = HOTSPOT_WIFI_RETRY_COUNT;
 
     err = esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_evt, o);
