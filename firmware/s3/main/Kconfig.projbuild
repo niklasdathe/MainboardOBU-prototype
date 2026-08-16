@@ -63,16 +63,6 @@ config OBU_WIFI_PASSWORD
     string "Development Wi-Fi password"
     default ""
 
-config OBU_WIFI_COUNTRY_CODE
-    string "Wi-Fi regulatory country code"
-    default "DE"
-    help
-        ISO country code used before the station has associated. The default is
-        DE for the Hamburg prototype and therefore permits European 2.4 GHz
-        channels 1-13. IEEE 802.11d remains enabled so, once associated, ESP-IDF
-        can adopt country information advertised by the access point. Change
-        this value when operating the prototype in another regulatory domain.
-
 config OBU_OTM_NODE_ID
     string "OpenTrafficMap node id"
     default "bicycleobu-prototype"
