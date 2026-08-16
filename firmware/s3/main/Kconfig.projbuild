@@ -33,12 +33,15 @@ config OBU_OTM_DIRECT_ENABLE
     select ESP_WIFI_ENABLE_WPA3_SAE
     select ESP_WIFI_ENABLE_SAE_H2E
     select ESP_WIFI_WPA3_COMPATIBLE_SUPPORT
+    select ESP_WIFI_ENABLE_WPA3_OWE_STA
     help
         Enable the development-only direct Wi-Fi/MQTT uplink. The station is
-        configured for common phone hotspot security modes including WPA2,
-        WPA3-SAE and WPA2/WPA3 transition mode. The ESP32-S3 hardware itself is
-        2.4 GHz only, so a phone hotspot that is strictly 5/6 GHz cannot be used
-        without changing the uplink hardware.
+        configured for common phone hotspot security modes including Open,
+        WPA2-Personal, WPA3-SAE, WPA2/WPA3 transition mode, WPA3-OWE and OWE
+        transition mode. The ESP32-S3 hardware itself is 2.4 GHz only, so a
+        phone hotspot that is strictly 5/6 GHz cannot be used without changing
+        the uplink hardware or enabling a 2.4 GHz compatibility mode on the
+        phone.
 
 config OBU_OTM_TLS_TRACE
     bool "Enable verbose OpenTrafficMap TLS handshake tracing"
