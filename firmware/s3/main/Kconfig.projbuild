@@ -31,6 +31,18 @@ config OBU_OTM_DIRECT_ENABLE
     bool "Enable direct OpenTrafficMap Wi-Fi uploader"
     default n
 
+config OBU_WIFI_DEBUG
+    bool "Enable Wi-Fi debug diagnostics"
+    depends on OBU_OTM_DIRECT_ENABLE
+    default n
+    help
+        Enable additional development diagnostics for the S3 Wi-Fi uplink.
+        The firmware logs Wi-Fi driver/netif debug output, the effective STA
+        configuration, association details, disconnect reason names and the
+        DHCP/IP transition without printing the configured Wi-Fi password.
+        This option does not intentionally change connection policy and should
+        normally remain disabled outside troubleshooting sessions.
+
 config OBU_OTM_TLS_TRACE
     bool "Enable verbose OpenTrafficMap TLS handshake tracing"
     depends on OBU_OTM_DIRECT_ENABLE
