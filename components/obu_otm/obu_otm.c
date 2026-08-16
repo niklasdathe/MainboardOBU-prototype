@@ -12,11 +12,6 @@
 #include "mqtt_client.h"
 #include "nvs_flash.h"
 
-#define HOTSPOT_WIFI_RETRY_COUNT 5u
-#define OTM_MQTT_NETWORK_TIMEOUT_MS 30000
-#define OTM_MQTT_RECONNECT_TIMEOUT_MS 5000
-#define OTM_MQTT_KEEPALIVE_S 30
-
 static const char *TAG = "obu_otm";
 
 struct obu_otm {
@@ -35,8 +30,6 @@ struct obu_otm {
     uint32_t errors;
     uint32_t wifi_connect_attempts;
     uint32_t wifi_disconnects;
-    uint32_t wifi_lost_ip_events;
-    uint32_t wifi_no_ap_events;
     uint32_t mqtt_attempts;
     uint32_t mqtt_connects;
     uint32_t mqtt_errors;
@@ -55,27 +48,6 @@ static void log_wifi_link(void)
                  ap.bssid[0], ap.bssid[1], ap.bssid[2], ap.bssid[3], ap.bssid[4], ap.bssid[5]);
     } else {
         ESP_LOGW(TAG, "Unable to read Wi-Fi AP info: %s", esp_err_to_name(err));
-    }
-}
-
-static void log_hotspot_compatibility_hint(struct obu_otm *o, uint8_t reason)
-{
-    if (o == NULL) return;
-
-    if (reason == WIFI_REASON_NO_AP_FOUND) {
-        o->wifi_no_ap_events++;
-        if (o->wifi_no_ap_events == 1u || (o->wifi_no_ap_events % 5u) == 0u) {
-            ESP_LOGW(TAG,
-                     "Hotspot SSID '%s' was not found. The ESP32-S3 Wi-Fi radio is 2.4 GHz only; "
-                     "the phone hotspot must expose a 2.4 GHz network. On iPhone 12 or newer use "
-                     "Personal Hotspot -> Maximize Compatibility when the normal hotspot is not visible.",
-                     o->wifi_ssid);
-        }
-    } else if (reason == WIFI_REASON_AUTH_FAIL || reason == WIFI_REASON_HANDSHAKE_TIMEOUT) {
-        ESP_LOGW(TAG,
-                 "Hotspot authentication/handshake failed (reason=%u). Open/OWE, WPA2-Personal, "
-                 "WPA3-Personal and transition hotspots are supported; verify the configured hotspot password.",
-                 (unsigned)reason);
     }
 }
 
@@ -107,14 +79,13 @@ static void log_mqtt_error(esp_mqtt_event_handle_t event, struct obu_otm *o)
                  (unsigned)o->mqtt_errors, (unsigned)err->error_type);
     }
     ESP_LOGI(TAG,
-             "MQTT diagnostic context: broker=%s wifi_ready=%s mqtt_started=%s attempts=%u connects=%u wifi_disconnects=%u lost_ip=%u network_restarts=%u",
+             "MQTT diagnostic context: broker=%s wifi_ready=%s mqtt_started=%s attempts=%u connects=%u wifi_disconnects=%u network_restarts=%u",
              o->broker_uri,
              o->wifi_ready ? "yes" : "no",
              o->mqtt_started ? "yes" : "no",
              (unsigned)o->mqtt_attempts,
              (unsigned)o->mqtt_connects,
              (unsigned)o->wifi_disconnects,
-             (unsigned)o->wifi_lost_ip_events,
              (unsigned)o->mqtt_network_restarts);
     log_wifi_link();
 }
@@ -158,10 +129,10 @@ static void stop_mqtt_for_network_loss(struct obu_otm *o)
 {
     if (o == NULL || o->mqtt == NULL || !o->mqtt_started) return;
 
-    /* Throw away the old TCP/TLS state whenever tethering changes underneath
-     * us. Phone hotspots frequently renumber/re-NAT clients after radio or
-     * cellular transitions, so reusing the old socket is less reliable than a
-     * clean MQTT restart after the next DHCP lease. */
+    /* This function is called from the Wi-Fi event handler, not from an MQTT
+     * callback. Stop the MQTT task/socket explicitly so the next DHCP lease
+     * starts from a fresh TCP/TLS state, matching the OpenTrafficMap receiver
+     * lifecycle of MQTT-up on GOT_IP and MQTT-down on network loss. */
     ESP_LOGI(TAG, "Stopping OpenTrafficMap MQTT because Wi-Fi/IP is unavailable");
     const esp_err_t err = esp_mqtt_client_stop(o->mqtt);
     if (err == ESP_OK) {
@@ -199,7 +170,6 @@ static void wifi_evt(void *arg, esp_event_base_t base, int32_t id, void *data)
         const esp_err_t err = esp_wifi_connect();
         if (err != ESP_OK) ESP_LOGW(TAG, "Wi-Fi connect request failed: %s", esp_err_to_name(err));
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_CONNECTED) {
-        o->wifi_no_ap_events = 0;
         ESP_LOGI(TAG, "Wi-Fi associated with SSID '%s'; waiting for DHCP/IP", o->wifi_ssid);
         log_wifi_link();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
@@ -211,19 +181,12 @@ static void wifi_evt(void *arg, esp_event_base_t base, int32_t id, void *data)
         if (disc != NULL) {
             ESP_LOGW(TAG, "Wi-Fi disconnected #%u: reason=%u RSSI=%d; reconnecting",
                      (unsigned)o->wifi_disconnects, (unsigned)disc->reason, (int)disc->rssi);
-            log_hotspot_compatibility_hint(o, disc->reason);
         } else {
             ESP_LOGW(TAG, "Wi-Fi disconnected #%u; reconnecting", (unsigned)o->wifi_disconnects);
         }
         o->wifi_connect_attempts++;
         const esp_err_t err = esp_wifi_connect();
         if (err != ESP_OK) ESP_LOGW(TAG, "Wi-Fi reconnect request failed: %s", esp_err_to_name(err));
-    } else if (base == IP_EVENT && id == IP_EVENT_STA_LOST_IP) {
-        o->wifi_ready = false;
-        o->wifi_lost_ip_events++;
-        ESP_LOGW(TAG, "Wi-Fi lost IP lease #%u; waiting for a fresh DHCP lease before MQTT restart",
-                 (unsigned)o->wifi_lost_ip_events);
-        stop_mqtt_for_network_loss(o);
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         o->wifi_ready = true;
         const ip_event_got_ip_t *got = (const ip_event_got_ip_t *)data;
@@ -268,10 +231,6 @@ esp_err_t obu_otm_wifi_start(const obu_otm_wifi_config_t *c, obu_otm_t **out)
 
     ESP_LOGI(TAG, "OTM direct uploader config: SSID='%s' broker='%s' node='%s' packet_topic='%s'",
              o->wifi_ssid, o->broker_uri, c->node_id, o->topic);
-    ESP_LOGI(TAG,
-             "Hotspot compatibility mode: 2.4GHz b/g/n, default regulatory settings, all-channel scan, "
-             "Open/OWE + WPA2/WPA3 Personal, PMF capable, Wi-Fi power-save disabled, MQTT network timeout=%dms",
-             OTM_MQTT_NETWORK_TIMEOUT_MS);
 #ifdef CONFIG_OBU_OTM_TLS_TRACE
     ESP_LOGW(TAG, "OpenTrafficMap TLS trace enabled; mbedTLS handshake diagnostics are active for development");
 #endif
@@ -317,35 +276,16 @@ esp_err_t obu_otm_wifi_start(const obu_otm_wifi_config_t *c, obu_otm_t **out)
 
     wifi_config_t wc = {0};
     strncpy((char *)wc.sta.ssid, c->wifi_ssid, sizeof(wc.sta.ssid) - 1);
-    const bool secured_hotspot = c->wifi_password != NULL && c->wifi_password[0] != '\0';
-    if (secured_hotspot) strncpy((char *)wc.sta.password, c->wifi_password, sizeof(wc.sta.password) - 1);
-
-    /* Avoid assumptions about a phone vendor's selected 2.4 GHz channel or
-     * WPA2/WPA3/OWE transition behavior. WPA2 is the minimum for password-
-     * protected hotspots; passwordless profiles also allow OWE/OWE transition. */
-    wc.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
-    wc.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
-    wc.sta.channel = 0;
-    wc.sta.bssid_set = false;
-    wc.sta.threshold.rssi = -127;
-    wc.sta.threshold.authmode = secured_hotspot ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
-    wc.sta.pmf_cfg.capable = true;
-    wc.sta.pmf_cfg.required = false;
-    wc.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
-    wc.sta.owe_enabled = !secured_hotspot;
-    wc.sta.failure_retry_cnt = HOTSPOT_WIFI_RETRY_COUNT;
+    if (c->wifi_password != NULL) strncpy((char *)wc.sta.password, c->wifi_password, sizeof(wc.sta.password) - 1);
 
     err = esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_evt, o);
     if (err != ESP_OK) return err;
-    err = esp_event_handler_register(IP_EVENT, ESP_EVENT_ANY_ID, wifi_evt, o);
+    err = esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_evt, o);
     if (err != ESP_OK) return err;
 
     esp_mqtt_client_config_t mc = {
         .broker.address.uri = o->broker_uri,
         .broker.verification.crt_bundle_attach = esp_crt_bundle_attach,
-        .network.timeout_ms = OTM_MQTT_NETWORK_TIMEOUT_MS,
-        .network.reconnect_timeout_ms = OTM_MQTT_RECONNECT_TIMEOUT_MS,
-        .session.keepalive = OTM_MQTT_KEEPALIVE_S,
         .session.last_will.topic = o->status,
         .session.last_will.msg = "offline",
         .session.last_will.retain = 1,
@@ -364,16 +304,6 @@ esp_err_t obu_otm_wifi_start(const obu_otm_wifi_config_t *c, obu_otm_t **out)
 
     err = esp_wifi_start();
     if (err != ESP_OK) return err;
-
-    /* Phone tethering is a development uplink where reliability matters more
-     * than S3 Wi-Fi energy savings. Keeping the radio awake also removes modem
-     * sleep latency from TLS handshakes and short hotspot beacon/DTIM windows. */
-    const esp_err_t ps_err = esp_wifi_set_ps(WIFI_PS_NONE);
-    if (ps_err != ESP_OK) {
-        ESP_LOGW(TAG, "Unable to disable Wi-Fi power save: %s", esp_err_to_name(ps_err));
-    } else {
-        ESP_LOGI(TAG, "Wi-Fi modem power save disabled for hotspot reliability");
-    }
 
     *out = o;
     return ESP_OK;
