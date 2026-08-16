@@ -16,9 +16,14 @@ jobs:
 
   build-c5:
     runs-on: ubuntu-latest
-    container: espressif/idf:release-v5.5
+    container: espressif/idf:release-v6.1
     steps:
       - uses: actions/checkout@v4
+      - name: Verify ESP-IDF 6.1
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          idf.py --version
       - name: Build ESP32-C5 firmware
         shell: bash
         run: |
@@ -28,9 +33,14 @@ jobs:
 
   build-s3:
     runs-on: ubuntu-latest
-    container: espressif/idf:release-v5.5
+    container: espressif/idf:release-v6.1
     steps:
       - uses: actions/checkout@v4
+      - name: Verify ESP-IDF 6.1
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          idf.py --version
       - name: Build ESP32-S3 firmware
         shell: bash
         run: |
