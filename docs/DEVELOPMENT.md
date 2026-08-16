@@ -25,9 +25,40 @@ Relevant S3 prototype options live under **BicycleOBU prototype** in Kconfig:
 
 - local Expansion Base warning buzzer enable/mute/frequency/duration;
 - optional direct OpenTrafficMap uploader;
-- development Wi-Fi credentials and OTM node ID.
+- development Wi-Fi credentials and OTM node ID;
+- optional Wi-Fi debug diagnostics for the development uplink.
 
 ESP-IDF boolean Kconfig options are not guaranteed to exist as C preprocessor symbols when disabled. Application code therefore uses `#ifdef`/explicit derived booleans instead of reading a disabled bool as an unconditional integer expression.
+
+## Wi-Fi debugging
+
+The direct Wi-Fi uplink is a development feature on the S3. To diagnose association, DHCP or Internet/MQTT failures without changing the normal connection policy:
+
+```bash
+idf.py -C firmware/s3 menuconfig
+```
+
+Then enable:
+
+**BicycleOBU prototype -> Enable direct OpenTrafficMap Wi-Fi uploader -> Enable Wi-Fi debug diagnostics**
+
+Configure the development SSID/password and node ID in the same menu, then rebuild, flash and monitor:
+
+```bash
+idf.py -C firmware/s3 build
+idf.py -C firmware/s3 flash monitor
+```
+
+With Wi-Fi debug diagnostics enabled, the serial log adds:
+
+- ESP-IDF Wi-Fi driver and netif `DEBUG` output;
+- effective STA configuration including scan/sort policy, fixed channel, RSSI/auth threshold, PMF flags and power-save mode;
+- association details including RSSI, channel, AP auth mode and BSSID;
+- disconnect reason number plus a readable reason for common failures such as AP-not-found, authentication, association, handshake and beacon timeouts;
+- DHCP `GOT_IP` data and `LOST_IP` transitions;
+- explicit initialization-stage failures before association.
+
+The configured Wi-Fi password is never printed; diagnostics expose only its length. Existing MQTT/TLS diagnostics remain separate, so the log can distinguish **Wi-Fi association -> DHCP/IP -> MQTT/TLS** failures. Disable the Wi-Fi debug option again after troubleshooting to reduce serial-log volume.
 
 ## Hardware-profile validation
 
