@@ -36,6 +36,74 @@ struct obu_otm {
     uint32_t mqtt_network_restarts;
 };
 
+static bool wifi_debug_enabled(void)
+{
+#ifdef CONFIG_OBU_WIFI_DEBUG
+    return true;
+#else
+    return false;
+#endif
+}
+
+static const char *wifi_disconnect_reason_name(uint8_t reason)
+{
+    switch (reason) {
+        case WIFI_REASON_NO_AP_FOUND: return "NO_AP_FOUND";
+        case WIFI_REASON_AUTH_FAIL: return "AUTH_FAIL";
+        case WIFI_REASON_ASSOC_FAIL: return "ASSOC_FAIL";
+        case WIFI_REASON_HANDSHAKE_TIMEOUT: return "HANDSHAKE_TIMEOUT";
+        case WIFI_REASON_BEACON_TIMEOUT: return "BEACON_TIMEOUT";
+        default: return "OTHER";
+    }
+}
+
+static void enable_wifi_debug_logging(void)
+{
+    if (!wifi_debug_enabled()) return;
+
+    esp_log_level_set(TAG, ESP_LOG_DEBUG);
+    esp_log_level_set("wifi", ESP_LOG_DEBUG);
+    esp_log_level_set("wifi_init", ESP_LOG_DEBUG);
+    esp_log_level_set("esp_netif_handlers", ESP_LOG_DEBUG);
+
+    ESP_LOGW(TAG,
+             "Wi-Fi debug diagnostics enabled: driver/netif DEBUG logs and OBU connection-state diagnostics are active; password contents are never logged");
+}
+
+static void log_wifi_config(const char *stage)
+{
+    if (!wifi_debug_enabled()) return;
+
+    wifi_config_t config = {0};
+    const esp_err_t config_err = esp_wifi_get_config(WIFI_IF_STA, &config);
+    if (config_err != ESP_OK) {
+        ESP_LOGW(TAG, "Wi-Fi debug [%s]: unable to read STA config: %s",
+                 stage != NULL ? stage : "state", esp_err_to_name(config_err));
+        return;
+    }
+
+    wifi_ps_type_t power_save = WIFI_PS_MIN_MODEM;
+    const esp_err_t ps_err = esp_wifi_get_ps(&power_save);
+    if (ps_err != ESP_OK) {
+        ESP_LOGW(TAG, "Wi-Fi debug [%s]: unable to read power-save mode: %s",
+                 stage != NULL ? stage : "state", esp_err_to_name(ps_err));
+    }
+
+    ESP_LOGI(TAG,
+             "Wi-Fi debug [%s]: SSID='%s' password_len=%u scan_method=%u sort_method=%u fixed_channel=%u threshold_rssi=%d threshold_auth=%u PMF(capable=%u required=%u) power_save=%d",
+             stage != NULL ? stage : "state",
+             (const char *)config.sta.ssid,
+             (unsigned)strnlen((const char *)config.sta.password, sizeof(config.sta.password)),
+             (unsigned)config.sta.scan_method,
+             (unsigned)config.sta.sort_method,
+             (unsigned)config.sta.channel,
+             (int)config.sta.threshold.rssi,
+             (unsigned)config.sta.threshold.authmode,
+             (unsigned)config.sta.pmf_cfg.capable,
+             (unsigned)config.sta.pmf_cfg.required,
+             ps_err == ESP_OK ? (int)power_save : -1);
+}
+
 static void log_wifi_link(void)
 {
     wifi_ap_record_t ap = {0};
@@ -163,22 +231,44 @@ static void wifi_evt(void *arg, esp_event_base_t base, int32_t id, void *data)
     struct obu_otm *o = arg;
     if (o == NULL) return;
 
+    if (wifi_debug_enabled()) {
+        const char *base_name = base == WIFI_EVENT ? "WIFI_EVENT" : (base == IP_EVENT ? "IP_EVENT" : "OTHER_EVENT");
+        ESP_LOGD(TAG, "Wi-Fi debug event: base=%s id=%ld", base_name, (long)id);
+    }
+
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         o->wifi_connect_attempts++;
         ESP_LOGI(TAG, "Wi-Fi STA started; connecting to SSID '%s' (attempt #%u)",
                  o->wifi_ssid, (unsigned)o->wifi_connect_attempts);
+        log_wifi_config("STA_START");
         const esp_err_t err = esp_wifi_connect();
         if (err != ESP_OK) ESP_LOGW(TAG, "Wi-Fi connect request failed: %s", esp_err_to_name(err));
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_CONNECTED) {
         ESP_LOGI(TAG, "Wi-Fi associated with SSID '%s'; waiting for DHCP/IP", o->wifi_ssid);
         log_wifi_link();
+        log_wifi_config("STA_CONNECTED");
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         o->wifi_ready = false;
         o->wifi_disconnects++;
         stop_mqtt_for_network_loss(o);
 
         const wifi_event_sta_disconnected_t *disc = (const wifi_event_sta_disconnected_t *)data;
-        if (disc != NULL) {
+        if (disc != NULL && wifi_debug_enabled()) {
+            ESP_LOGW(TAG,
+                     "Wi-Fi disconnected #%u: reason=%u (%s) RSSI=%d BSSID=%02x:%02x:%02x:%02x:%02x:%02x; reconnecting",
+                     (unsigned)o->wifi_disconnects,
+                     (unsigned)disc->reason,
+                     wifi_disconnect_reason_name(disc->reason),
+                     (int)disc->rssi,
+                     disc->bssid[0], disc->bssid[1], disc->bssid[2], disc->bssid[3], disc->bssid[4], disc->bssid[5]);
+            if (disc->reason == WIFI_REASON_NO_AP_FOUND) {
+                ESP_LOGW(TAG,
+                         "Wi-Fi debug: configured SSID was not found; verify SSID spelling, hotspot visibility, supported band/channel and that the hotspot is actively advertising");
+            } else if (disc->reason == WIFI_REASON_AUTH_FAIL || disc->reason == WIFI_REASON_HANDSHAKE_TIMEOUT) {
+                ESP_LOGW(TAG,
+                         "Wi-Fi debug: authentication/handshake failed; verify the configured password and hotspot security mode");
+            }
+        } else if (disc != NULL) {
             ESP_LOGW(TAG, "Wi-Fi disconnected #%u: reason=%u RSSI=%d; reconnecting",
                      (unsigned)o->wifi_disconnects, (unsigned)disc->reason, (int)disc->rssi);
         } else {
@@ -200,7 +290,11 @@ static void wifi_evt(void *arg, esp_event_base_t base, int32_t id, void *data)
             ESP_LOGI(TAG, "Wi-Fi acquired IP address");
         }
         log_wifi_link();
+        log_wifi_config("GOT_IP");
         start_mqtt_after_ip(o);
+    } else if (base == IP_EVENT && id == IP_EVENT_STA_LOST_IP && wifi_debug_enabled()) {
+        ESP_LOGW(TAG,
+                 "Wi-Fi debug: station lost its IP lease; Wi-Fi association may still be present, watch for a new GOT_IP event or a subsequent disconnect");
     }
 }
 
@@ -222,6 +316,8 @@ esp_err_t obu_otm_wifi_start(const obu_otm_wifi_config_t *c, obu_otm_t **out)
         free(o);
         return ESP_ERR_INVALID_ARG;
     }
+
+    enable_wifi_debug_logging();
 
     snprintf(o->topic, sizeof(o->topic), "its/%s/packet", c->node_id);
     snprintf(o->status, sizeof(o->status), "its/%s/status", c->node_id);
@@ -246,23 +342,27 @@ esp_err_t obu_otm_wifi_start(const obu_otm_wifi_config_t *c, obu_otm_t **out)
         err = nvs_flash_init();
     }
     if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Wi-Fi initialization failed at NVS init: %s", esp_err_to_name(err));
         free(o);
         return err;
     }
 
     err = esp_netif_init();
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "Wi-Fi initialization failed at esp_netif_init: %s", esp_err_to_name(err));
         free(o);
         return err;
     }
 
     err = esp_event_loop_create_default();
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "Wi-Fi initialization failed creating default event loop: %s", esp_err_to_name(err));
         free(o);
         return err;
     }
 
     if (esp_netif_create_default_wifi_sta() == NULL) {
+        ESP_LOGE(TAG, "Wi-Fi initialization failed creating default STA netif");
         free(o);
         return ESP_FAIL;
     }
@@ -270,6 +370,7 @@ esp_err_t obu_otm_wifi_start(const obu_otm_wifi_config_t *c, obu_otm_t **out)
     wifi_init_config_t wi = WIFI_INIT_CONFIG_DEFAULT();
     err = esp_wifi_init(&wi);
     if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Wi-Fi initialization failed at esp_wifi_init: %s", esp_err_to_name(err));
         free(o);
         return err;
     }
@@ -279,9 +380,15 @@ esp_err_t obu_otm_wifi_start(const obu_otm_wifi_config_t *c, obu_otm_t **out)
     if (c->wifi_password != NULL) strncpy((char *)wc.sta.password, c->wifi_password, sizeof(wc.sta.password) - 1);
 
     err = esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_evt, o);
-    if (err != ESP_OK) return err;
-    err = esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_evt, o);
-    if (err != ESP_OK) return err;
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Wi-Fi initialization failed registering Wi-Fi event handler: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = esp_event_handler_register(IP_EVENT, ESP_EVENT_ANY_ID, wifi_evt, o);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Wi-Fi initialization failed registering IP event handler: %s", esp_err_to_name(err));
+        return err;
+    }
 
     esp_mqtt_client_config_t mc = {
         .broker.address.uri = o->broker_uri,
@@ -292,18 +399,35 @@ esp_err_t obu_otm_wifi_start(const obu_otm_wifi_config_t *c, obu_otm_t **out)
         .session.last_will.qos = 0,
     };
     o->mqtt = esp_mqtt_client_init(&mc);
-    if (o->mqtt == NULL) return ESP_FAIL;
+    if (o->mqtt == NULL) {
+        ESP_LOGE(TAG, "OpenTrafficMap MQTT client initialization failed");
+        return ESP_FAIL;
+    }
 
     err = esp_mqtt_client_register_event(o->mqtt, ESP_EVENT_ANY_ID, mqtt_evt, o);
-    if (err != ESP_OK) return err;
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "OpenTrafficMap MQTT event registration failed: %s", esp_err_to_name(err));
+        return err;
+    }
 
     err = esp_wifi_set_mode(WIFI_MODE_STA);
-    if (err != ESP_OK) return err;
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Wi-Fi initialization failed setting STA mode: %s", esp_err_to_name(err));
+        return err;
+    }
     err = esp_wifi_set_config(WIFI_IF_STA, &wc);
-    if (err != ESP_OK) return err;
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Wi-Fi initialization failed applying STA configuration: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    log_wifi_config("CONFIGURED");
 
     err = esp_wifi_start();
-    if (err != ESP_OK) return err;
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Wi-Fi initialization failed starting driver: %s", esp_err_to_name(err));
+        return err;
+    }
 
     *out = o;
     return ESP_OK;
