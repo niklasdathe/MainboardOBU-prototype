@@ -5,3 +5,4 @@ firmware/*/sdkconfig
 *.pcap
 .DS_Store
 .vscode/settings.json
+.vscode/settings-DesktopCaspar.json
