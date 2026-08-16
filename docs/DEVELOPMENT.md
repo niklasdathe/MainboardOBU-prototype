@@ -38,9 +38,7 @@ The direct Wi-Fi uplink is a development feature on the S3. To diagnose associat
 idf.py -C firmware/s3 menuconfig
 ```
 
-Then enable:
-
-**BicycleOBU prototype -> Enable direct OpenTrafficMap Wi-Fi uploader -> Enable Wi-Fi debug diagnostics**
+Under **BicycleOBU prototype**, enable **Enable direct OpenTrafficMap Wi-Fi uploader** and then **Enable Wi-Fi debug diagnostics**.
 
 Configure the development SSID/password and node ID in the same menu, then rebuild, flash and monitor:
 
