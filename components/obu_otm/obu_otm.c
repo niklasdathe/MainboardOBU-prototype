@@ -17,16 +17,6 @@
 #define OTM_MQTT_RECONNECT_TIMEOUT_MS 5000
 #define OTM_MQTT_KEEPALIVE_S 30
 
-/*
- * obu_otm is a shared component and is compiled for both the S3 and C5
- * firmware. The country-code Kconfig option belongs to the S3 application,
- * where the direct Wi-Fi uplink is actually used. Keep the shared component
- * buildable for targets which do not expose that application Kconfig symbol.
- */
-#ifndef CONFIG_OBU_WIFI_COUNTRY_CODE
-#define CONFIG_OBU_WIFI_COUNTRY_CODE "DE"
-#endif
-
 static const char *TAG = "obu_otm";
 
 struct obu_otm {
@@ -279,9 +269,9 @@ esp_err_t obu_otm_wifi_start(const obu_otm_wifi_config_t *c, obu_otm_t **out)
     ESP_LOGI(TAG, "OTM direct uploader config: SSID='%s' broker='%s' node='%s' packet_topic='%s'",
              o->wifi_ssid, o->broker_uri, c->node_id, o->topic);
     ESP_LOGI(TAG,
-             "Hotspot compatibility mode: 2.4GHz b/g/n, country=%s with 802.11d auto-update, all-channel scan, "
+             "Hotspot compatibility mode: 2.4GHz b/g/n, default regulatory settings, all-channel scan, "
              "Open/OWE + WPA2/WPA3 Personal, PMF capable, Wi-Fi power-save disabled, MQTT network timeout=%dms",
-             CONFIG_OBU_WIFI_COUNTRY_CODE, OTM_MQTT_NETWORK_TIMEOUT_MS);
+             OTM_MQTT_NETWORK_TIMEOUT_MS);
 #ifdef CONFIG_OBU_OTM_TLS_TRACE
     ESP_LOGW(TAG, "OpenTrafficMap TLS trace enabled; mbedTLS handshake diagnostics are active for development");
 #endif
@@ -322,17 +312,6 @@ esp_err_t obu_otm_wifi_start(const obu_otm_wifi_config_t *c, obu_otm_t **out)
     err = esp_wifi_init(&wi);
     if (err != ESP_OK) {
         free(o);
-        return err;
-    }
-
-    /* The default world-safe domain only scans channels 1-11 before association.
-     * Configure the actual operating country so European phone hotspots on
-     * channels 12/13 can be discovered. 802.11d lets the AP update the country
-     * information after association. */
-    err = esp_wifi_set_country_code(CONFIG_OBU_WIFI_COUNTRY_CODE, true);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Invalid/unsupported Wi-Fi country code '%s': %s",
-                 CONFIG_OBU_WIFI_COUNTRY_CODE, esp_err_to_name(err));
         return err;
     }
 
