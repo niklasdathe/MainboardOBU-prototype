@@ -27,6 +27,7 @@ struct obu_otm {
     bool wifi_ready;
     bool mqtt_ready;
     bool mqtt_started;
+    bool dns_main_promoted;
     volatile bool dns_task_running;
     char topic[96];
     char status[96];
@@ -43,6 +44,7 @@ struct obu_otm {
     uint32_t wifi_disconnects;
     uint32_t dns_attempts;
     uint32_t dns_failures;
+    uint32_t dns_promotions;
     uint32_t mqtt_attempts;
     uint32_t mqtt_connects;
     uint32_t mqtt_errors;
@@ -228,6 +230,51 @@ static void configure_dns_fallback(esp_netif_t *netif)
 #endif
 }
 
+static bool promote_dns_fallback_to_main(struct obu_otm *o)
+{
+#ifdef CONFIG_OBU_DNS_FALLBACK_ENABLE
+    if (o == NULL || o->sta_netif == NULL || o->dns_main_promoted) return false;
+
+    esp_netif_dns_info_t fallback = {0};
+    esp_err_t err = esp_netif_get_dns_info(o->sta_netif, ESP_NETIF_DNS_FALLBACK, &fallback);
+    if (err != ESP_OK || fallback.ip.type != IPADDR_TYPE_V4 || fallback.ip.u_addr.ip4.addr == 0U) {
+        ESP_LOGW(TAG, "Cannot promote fallback DNS: configured fallback is unavailable");
+        return false;
+    }
+
+    esp_netif_dns_info_t current_main = {0};
+    const esp_err_t get_main_err = esp_netif_get_dns_info(o->sta_netif, ESP_NETIF_DNS_MAIN, &current_main);
+    if (get_main_err == ESP_OK &&
+        current_main.ip.type == IPADDR_TYPE_V4 &&
+        current_main.ip.u_addr.ip4.addr != 0U &&
+        current_main.ip.u_addr.ip4.addr != fallback.ip.u_addr.ip4.addr) {
+        const esp_err_t backup_err = esp_netif_set_dns_info(o->sta_netif, ESP_NETIF_DNS_BACKUP, &current_main);
+        if (backup_err != ESP_OK) {
+            ESP_LOGW(TAG, "Unable to preserve DHCP DNS as backup before failover: %s",
+                     esp_err_to_name(backup_err));
+        }
+    }
+
+    err = esp_netif_set_dns_info(o->sta_netif, ESP_NETIF_DNS_MAIN, &fallback);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Unable to promote fallback DNS to main resolver: %s", esp_err_to_name(err));
+        return false;
+    }
+
+    o->dns_main_promoted = true;
+    o->dns_promotions++;
+    ESP_LOGW(TAG,
+             "DNS failover #%u: promoted %s to MAIN after resolver timeout; prior DHCP DNS retained as BACKUP when available",
+             (unsigned)o->dns_promotions,
+             CONFIG_OBU_DNS_FALLBACK_IPV4);
+    log_dns_config(o->sta_netif, "FAILOVER");
+    return true;
+#else
+    (void)o;
+    return false;
+#endif
+}
+
 static bool resolve_broker_hostname(struct obu_otm *o)
 {
     if (o == NULL || o->broker_host[0] == '\0') return false;
@@ -386,6 +433,11 @@ static void dns_gate_task(void *arg)
         }
 
         if (!o->wifi_ready) break;
+        if (promote_dns_fallback_to_main(o)) {
+            ESP_LOGW(TAG, "Retrying broker DNS immediately with promoted fallback resolver");
+            continue;
+        }
+
         ESP_LOGW(TAG, "Broker DNS unresolved; retrying preflight in %u ms while Wi-Fi remains available",
                  (unsigned)OBU_DNS_RETRY_DELAY_MS);
         vTaskDelay(pdMS_TO_TICKS(OBU_DNS_RETRY_DELAY_MS));
@@ -437,6 +489,7 @@ static void wifi_evt(void *arg, esp_event_base_t base, int32_t id, void *data)
         log_wifi_config("STA_CONNECTED");
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         o->wifi_ready = false;
+        o->dns_main_promoted = false;
         o->wifi_disconnects++;
         stop_mqtt_for_network_loss(o);
 
@@ -467,6 +520,7 @@ static void wifi_evt(void *arg, esp_event_base_t base, int32_t id, void *data)
         if (err != ESP_OK) ESP_LOGW(TAG, "Wi-Fi reconnect request failed: %s", esp_err_to_name(err));
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         o->wifi_ready = true;
+        o->dns_main_promoted = false;
         const ip_event_got_ip_t *got = (const ip_event_got_ip_t *)data;
         if (got != NULL) {
             ESP_LOGI(TAG, "Wi-Fi acquired IP: " IPSTR " netmask=" IPSTR " gateway=" IPSTR " changed=%s",
