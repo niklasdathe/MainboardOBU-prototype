@@ -9,20 +9,31 @@
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "lwip/netdb.h"
+#include "lwip/sockets.h"
 #include "mqtt_client.h"
 #include "nvs_flash.h"
 
 static const char *TAG = "obu_otm";
+
+#define OBU_DNS_RETRY_DELAY_MS 3000U
+#define OBU_DNS_TASK_STACK_SIZE 4096U
+#define OBU_DNS_TASK_PRIORITY 5U
 
 struct obu_otm {
     bool enabled;
     bool wifi_ready;
     bool mqtt_ready;
     bool mqtt_started;
+    volatile bool dns_task_running;
     char topic[96];
     char status[96];
     char broker_uri[128];
+    char broker_host[96];
     char wifi_ssid[33];
+    esp_netif_t *sta_netif;
     esp_mqtt_client_handle_t mqtt;
     uint32_t attempted;
     uint32_t successful;
@@ -30,6 +41,8 @@ struct obu_otm {
     uint32_t errors;
     uint32_t wifi_connect_attempts;
     uint32_t wifi_disconnects;
+    uint32_t dns_attempts;
+    uint32_t dns_failures;
     uint32_t mqtt_attempts;
     uint32_t mqtt_connects;
     uint32_t mqtt_errors;
@@ -55,6 +68,40 @@ static const char *wifi_disconnect_reason_name(uint8_t reason)
         case WIFI_REASON_BEACON_TIMEOUT: return "BEACON_TIMEOUT";
         default: return "OTHER";
     }
+}
+
+static bool broker_hostname_from_uri(const char *uri, char *host, size_t host_size)
+{
+    if (uri == NULL || host == NULL || host_size < 2U) return false;
+
+    const char *authority = strstr(uri, "://");
+    authority = authority != NULL ? authority + 3 : uri;
+    if (*authority == '\0') return false;
+
+    const char *authority_end = strchr(authority, '/');
+    if (authority_end == NULL) authority_end = authority + strlen(authority);
+
+    const char *host_start = authority;
+    for (const char *p = authority; p < authority_end; ++p) {
+        if (*p == '@') host_start = p + 1;
+    }
+    if (host_start >= authority_end) return false;
+
+    const char *host_end = authority_end;
+    if (*host_start == '[') {
+        ++host_start;
+        host_end = memchr(host_start, ']', (size_t)(authority_end - host_start));
+        if (host_end == NULL) return false;
+    } else {
+        const char *colon = memchr(host_start, ':', (size_t)(authority_end - host_start));
+        if (colon != NULL) host_end = colon;
+    }
+
+    const size_t len = (size_t)(host_end - host_start);
+    if (len == 0U || len >= host_size) return false;
+    memcpy(host, host_start, len);
+    host[len] = '\0';
+    return true;
 }
 
 static void enable_wifi_debug_logging(void)
@@ -119,6 +166,97 @@ static void log_wifi_link(void)
     }
 }
 
+static void log_dns_server(esp_netif_t *netif, esp_netif_dns_type_t type, const char *name, const char *stage)
+{
+    esp_netif_dns_info_t dns = {0};
+    const esp_err_t err = esp_netif_get_dns_info(netif, type, &dns);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "DNS [%s] %s: unavailable (%s)", stage, name, esp_err_to_name(err));
+        return;
+    }
+
+    if (dns.ip.type == IPADDR_TYPE_V4) {
+        char address[16] = {0};
+        if (esp_ip4addr_ntoa(&dns.ip.u_addr.ip4, address, sizeof(address)) != NULL) {
+            ESP_LOGI(TAG, "DNS [%s] %s=%s", stage, name, address);
+            return;
+        }
+    }
+
+    ESP_LOGI(TAG, "DNS [%s] %s: configured address type=%u",
+             stage, name, (unsigned)dns.ip.type);
+}
+
+static void log_dns_config(esp_netif_t *netif, const char *stage)
+{
+    if (netif == NULL) {
+        ESP_LOGW(TAG, "DNS [%s]: STA netif unavailable", stage);
+        return;
+    }
+
+    log_dns_server(netif, ESP_NETIF_DNS_MAIN, "main", stage);
+    log_dns_server(netif, ESP_NETIF_DNS_BACKUP, "backup", stage);
+    log_dns_server(netif, ESP_NETIF_DNS_FALLBACK, "fallback", stage);
+}
+
+static void configure_dns_fallback(esp_netif_t *netif)
+{
+#ifdef CONFIG_OBU_DNS_FALLBACK_ENABLE
+    if (netif == NULL) return;
+
+    esp_ip4_addr_t fallback_ip = {0};
+    const esp_err_t parse_err = esp_netif_str_to_ip4(CONFIG_OBU_DNS_FALLBACK_IPV4, &fallback_ip);
+    if (parse_err != ESP_OK) {
+        ESP_LOGE(TAG, "Configured fallback DNS '%s' is not a valid IPv4 address",
+                 CONFIG_OBU_DNS_FALLBACK_IPV4);
+        return;
+    }
+
+    esp_netif_dns_info_t dns = {0};
+    dns.ip.type = IPADDR_TYPE_V4;
+    dns.ip.u_addr.ip4.addr = fallback_ip.addr;
+
+    const esp_err_t err = esp_netif_set_dns_info(netif, ESP_NETIF_DNS_FALLBACK, &dns);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Installed configurable DNS fallback %s", CONFIG_OBU_DNS_FALLBACK_IPV4);
+    } else {
+        ESP_LOGW(TAG, "Unable to install DNS fallback %s: %s",
+                 CONFIG_OBU_DNS_FALLBACK_IPV4, esp_err_to_name(err));
+    }
+#else
+    (void)netif;
+#endif
+}
+
+static bool resolve_broker_hostname(struct obu_otm *o)
+{
+    if (o == NULL || o->broker_host[0] == '\0') return false;
+
+    struct addrinfo hints = {0};
+    struct addrinfo *result = NULL;
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+
+    o->dns_attempts++;
+    const int rc = getaddrinfo(o->broker_host, NULL, &hints, &result);
+    if (rc != 0 || result == NULL) {
+        o->dns_failures++;
+        if (result != NULL) freeaddrinfo(result);
+        ESP_LOGW(TAG,
+                 "DNS preflight #%u failed for '%s': getaddrinfo=%d failures=%u; MQTT start deferred",
+                 (unsigned)o->dns_attempts,
+                 o->broker_host,
+                 rc,
+                 (unsigned)o->dns_failures);
+        return false;
+    }
+
+    ESP_LOGI(TAG, "DNS preflight #%u resolved '%s' (family=%d); MQTT may start",
+             (unsigned)o->dns_attempts, o->broker_host, result->ai_family);
+    freeaddrinfo(result);
+    return true;
+}
+
 static void log_mqtt_error(esp_mqtt_event_handle_t event, struct obu_otm *o)
 {
     o->mqtt_errors++;
@@ -147,15 +285,18 @@ static void log_mqtt_error(esp_mqtt_event_handle_t event, struct obu_otm *o)
                  (unsigned)o->mqtt_errors, (unsigned)err->error_type);
     }
     ESP_LOGI(TAG,
-             "MQTT diagnostic context: broker=%s wifi_ready=%s mqtt_started=%s attempts=%u connects=%u wifi_disconnects=%u network_restarts=%u",
+             "MQTT diagnostic context: broker=%s wifi_ready=%s mqtt_started=%s dns_attempts=%u dns_failures=%u attempts=%u connects=%u wifi_disconnects=%u network_restarts=%u",
              o->broker_uri,
              o->wifi_ready ? "yes" : "no",
              o->mqtt_started ? "yes" : "no",
+             (unsigned)o->dns_attempts,
+             (unsigned)o->dns_failures,
              (unsigned)o->mqtt_attempts,
              (unsigned)o->mqtt_connects,
              (unsigned)o->wifi_disconnects,
              (unsigned)o->mqtt_network_restarts);
     log_wifi_link();
+    log_dns_config(o->sta_netif, "MQTT_ERROR");
 }
 
 static void mqtt_evt(void *arg, esp_event_base_t base, int32_t id, void *data)
@@ -216,13 +357,60 @@ static void start_mqtt_after_ip(struct obu_otm *o)
 {
     if (o == NULL || o->mqtt == NULL || o->mqtt_started || !o->wifi_ready) return;
 
-    ESP_LOGI(TAG, "Wi-Fi has IP; starting OpenTrafficMap MQTT client for %s", o->broker_uri);
+    ESP_LOGI(TAG, "DNS is ready; starting OpenTrafficMap MQTT client for %s", o->broker_uri);
     const esp_err_t err = esp_mqtt_client_start(o->mqtt);
     if (err == ESP_OK) {
         o->mqtt_started = true;
     } else {
         o->errors++;
         ESP_LOGE(TAG, "Failed to start OpenTrafficMap MQTT client: %s", esp_err_to_name(err));
+    }
+}
+
+static void dns_gate_task(void *arg)
+{
+    struct obu_otm *o = arg;
+    if (o == NULL) {
+        vTaskDelete(NULL);
+        return;
+    }
+
+    log_dns_config(o->sta_netif, "DHCP");
+    configure_dns_fallback(o->sta_netif);
+    log_dns_config(o->sta_netif, "EFFECTIVE");
+
+    while (o->wifi_ready && !o->mqtt_started) {
+        if (resolve_broker_hostname(o)) {
+            if (o->wifi_ready) start_mqtt_after_ip(o);
+            break;
+        }
+
+        if (!o->wifi_ready) break;
+        ESP_LOGW(TAG, "Broker DNS unresolved; retrying preflight in %u ms while Wi-Fi remains available",
+                 (unsigned)OBU_DNS_RETRY_DELAY_MS);
+        vTaskDelay(pdMS_TO_TICKS(OBU_DNS_RETRY_DELAY_MS));
+    }
+
+    o->dns_task_running = false;
+    vTaskDelete(NULL);
+}
+
+static void start_dns_gate_after_ip(struct obu_otm *o)
+{
+    if (o == NULL || !o->wifi_ready || o->mqtt_started || o->dns_task_running) return;
+
+    o->dns_task_running = true;
+    const BaseType_t created = xTaskCreate(dns_gate_task,
+                                           "otm_dns",
+                                           OBU_DNS_TASK_STACK_SIZE,
+                                           o,
+                                           OBU_DNS_TASK_PRIORITY,
+                                           NULL);
+    if (created != pdPASS) {
+        o->dns_task_running = false;
+        o->errors++;
+        ESP_LOGE(TAG, "Failed to create DNS preflight task; starting MQTT without preflight");
+        start_mqtt_after_ip(o);
     }
 }
 
@@ -291,7 +479,7 @@ static void wifi_evt(void *arg, esp_event_base_t base, int32_t id, void *data)
         }
         log_wifi_link();
         log_wifi_config("GOT_IP");
-        start_mqtt_after_ip(o);
+        start_dns_gate_after_ip(o);
     } else if (base == IP_EVENT && id == IP_EVENT_STA_LOST_IP && wifi_debug_enabled()) {
         ESP_LOGW(TAG,
                  "Wi-Fi debug: station lost its IP lease; Wi-Fi association may still be present, watch for a new GOT_IP event or a subsequent disconnect");
@@ -325,10 +513,21 @@ esp_err_t obu_otm_wifi_start(const obu_otm_wifi_config_t *c, obu_otm_t **out)
              c->broker_uri != NULL ? c->broker_uri : "mqtts://cits1.opentrafficmap.org");
     snprintf(o->wifi_ssid, sizeof(o->wifi_ssid), "%s", c->wifi_ssid);
 
-    ESP_LOGI(TAG, "OTM direct uploader config: SSID='%s' broker='%s' node='%s' packet_topic='%s'",
-             o->wifi_ssid, o->broker_uri, c->node_id, o->topic);
+    if (!broker_hostname_from_uri(o->broker_uri, o->broker_host, sizeof(o->broker_host))) {
+        ESP_LOGE(TAG, "Unable to extract broker hostname from URI '%s'", o->broker_uri);
+        free(o);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ESP_LOGI(TAG, "OTM direct uploader config: SSID='%s' broker='%s' broker_host='%s' node='%s' packet_topic='%s'",
+             o->wifi_ssid, o->broker_uri, o->broker_host, c->node_id, o->topic);
 #ifdef CONFIG_OBU_OTM_TLS_TRACE
     ESP_LOGW(TAG, "OpenTrafficMap TLS trace enabled; mbedTLS handshake diagnostics are active for development");
+#endif
+#ifdef CONFIG_OBU_DNS_FALLBACK_ENABLE
+    ESP_LOGI(TAG, "OTM DNS fallback enabled: %s", CONFIG_OBU_DNS_FALLBACK_IPV4);
+#else
+    ESP_LOGI(TAG, "OTM DNS fallback disabled; DHCP-provided DNS only");
 #endif
 
     esp_err_t err = nvs_flash_init();
@@ -361,7 +560,8 @@ esp_err_t obu_otm_wifi_start(const obu_otm_wifi_config_t *c, obu_otm_t **out)
         return err;
     }
 
-    if (esp_netif_create_default_wifi_sta() == NULL) {
+    o->sta_netif = esp_netif_create_default_wifi_sta();
+    if (o->sta_netif == NULL) {
         ESP_LOGE(TAG, "Wi-Fi initialization failed creating default STA netif");
         free(o);
         return ESP_FAIL;
