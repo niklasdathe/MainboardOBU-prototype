@@ -12,6 +12,7 @@
 #include "freertos/task.h"
 #include "obu_radio.h"
 #include "sdkconfig.h"
+#include "vam_encoder.h"
 
 #define TX_FRAME_MAX 2400u
 #define TX_PDU_MAX 2200u
@@ -168,10 +169,7 @@ typedef struct {
 #define IVIM_PERIODIC false
 #endif
 
-/*
- * Release-2 message identifiers and the corresponding well-known BTP ports.
- * The Facilities bytes themselves are supplied as UPER hex through menuconfig.
- */
+/* Release-2 message identifiers and their well-known BTP ports. */
 static tx_profile_t profiles[] = {
     {.name = "CAM", .protocol_version = 2, .message_id = 2, .btp_port = 2001,
      .gn_mode = GN_MODE_SHB, .enabled = CAM_ENABLED, .button = CAM_BUTTON,
@@ -271,9 +269,19 @@ static bool parse_hex(const char *text, uint8_t *out, size_t capacity, size_t *o
 static bool its_time_ms(uint64_t *out_ms)
 {
     if (out_ms == NULL || CONFIG_C5_TX_UNIX_TIME_AT_BOOT <= (int)ITS_EPOCH_UNIX_S) return false;
-    const uint64_t boot_its_ms = ((uint64_t)CONFIG_C5_TX_UNIX_TIME_AT_BOOT - ITS_EPOCH_UNIX_S) * 1000ULL;
+
+    const uint64_t utc_elapsed_s = (uint64_t)CONFIG_C5_TX_UNIX_TIME_AT_BOOT - ITS_EPOCH_UNIX_S;
+    const uint64_t boot_its_ms =
+        (utc_elapsed_s + (uint64_t)CONFIG_C5_TX_ITS_LEAP_SECONDS_SINCE_EPOCH) * 1000ULL;
     *out_ms = boot_its_ms + (uint64_t)(esp_timer_get_time() / 1000LL);
     return true;
+}
+
+static uint16_t generation_delta_time(void)
+{
+    uint64_t value = 0;
+    if (its_time_ms(&value)) return (uint16_t)(value & 0xffffu);
+    return (uint16_t)(((uint64_t)esp_timer_get_time() / 1000ULL) & 0xffffu);
 }
 
 static uint32_t gn_timestamp_ms(void)
@@ -301,8 +309,51 @@ static void fill_long_position_vector(uint8_t *out)
     write_be16(out + 22, (uint16_t)CONFIG_C5_TX_HEADING_DEG10);
 }
 
+#ifdef CONFIG_C5_TX_VAM_GENERATED
+static bool generate_vam_pdu(size_t *out_len)
+{
+    const vam_minimal_config_t config = {
+        .station_id = (uint32_t)CONFIG_C5_TX_STATION_ID,
+        .generation_delta_time = generation_delta_time(),
+        .station_type = (uint8_t)CONFIG_C5_TX_GN_STATION_TYPE,
+        .latitude_1e7 = (int32_t)CONFIG_C5_TX_LATITUDE_1E7,
+        .longitude_1e7 = (int32_t)CONFIG_C5_TX_LONGITUDE_1E7,
+        .position_semi_major_confidence_cm =
+            (uint16_t)CONFIG_C5_TX_VAM_POSITION_SEMI_MAJOR_CONFIDENCE_CM,
+        .position_semi_minor_confidence_cm =
+            (uint16_t)CONFIG_C5_TX_VAM_POSITION_SEMI_MINOR_CONFIDENCE_CM,
+        .position_semi_major_orientation_deg10 =
+            (uint16_t)CONFIG_C5_TX_VAM_POSITION_SEMI_MAJOR_ORIENTATION_DEG10,
+        .altitude_cm = (int32_t)CONFIG_C5_TX_VAM_ALTITUDE_CM,
+        .altitude_confidence = (uint8_t)CONFIG_C5_TX_VAM_ALTITUDE_CONFIDENCE,
+        .heading_deg10 = (uint16_t)CONFIG_C5_TX_HEADING_DEG10,
+        .heading_confidence_deg10 = (uint8_t)CONFIG_C5_TX_VAM_HEADING_CONFIDENCE_DEG10,
+        .speed_cm_s = (uint16_t)CONFIG_C5_TX_SPEED_CM_S,
+        .speed_confidence_cm_s = (uint8_t)CONFIG_C5_TX_VAM_SPEED_CONFIDENCE_CM_S,
+        .longitudinal_acceleration_dm_s2 =
+            (int16_t)CONFIG_C5_TX_VAM_LONGITUDINAL_ACCELERATION_DM_S2,
+        .longitudinal_acceleration_confidence_dm_s2 =
+            (uint8_t)CONFIG_C5_TX_VAM_LONGITUDINAL_ACCELERATION_CONFIDENCE_DM_S2,
+    };
+
+    const vam_encode_result_t result =
+        vam_encode_minimal_uper(&config, pdu_buffer, sizeof(pdu_buffer), out_len);
+    if (result != VAM_ENCODE_OK) {
+        ESP_LOGE(TAG, "Generated VAM failed: %s", vam_encode_result_name(result));
+        return false;
+    }
+    return true;
+}
+#endif
+
 static bool load_facilities_pdu(tx_profile_t *profile, size_t *out_len)
 {
+#ifdef CONFIG_C5_TX_VAM_GENERATED
+    if (profile->message_id == 16u) {
+        return generate_vam_pdu(out_len);
+    }
+#endif
+
     size_t length = 0;
     const bool configured = profile->pdu_hex != NULL && profile->pdu_hex[0] != '\0';
 
@@ -466,7 +517,7 @@ static void transmit_button_profiles(const char *reason)
         sent_any |= transmit_profile(&profiles[i], reason);
     }
     if (!sent_any) {
-        ESP_LOGW(TAG, "%s trigger produced no frame; configure at least one enabled button profile with UPER hex",
+        ESP_LOGW(TAG, "%s trigger produced no frame; enable a generated profile or configure UPER hex",
                  reason);
     }
 }
@@ -543,11 +594,21 @@ void app_main(void)
              CONFIG_C5_TX_BOOT_GPIO, CONFIG_C5_TX_LED_GPIO);
     ESP_LOGI(TAG, "Profiles: CAM/BTP2001, DENM/BTP2002, MAPEM/2003, SPATEM/2004, IVIM/2006, CPM/2009, VAM/2018");
 
+#ifdef CONFIG_C5_TX_VAM_GENERATED
+    ESP_LOGI(TAG,
+             "VAM source=generated station=%d type=%d lat=%d lon=%d speed=%dcm/s heading=%d/10deg",
+             CONFIG_C5_TX_STATION_ID, CONFIG_C5_TX_GN_STATION_TYPE,
+             CONFIG_C5_TX_LATITUDE_1E7, CONFIG_C5_TX_LONGITUDE_1E7,
+             CONFIG_C5_TX_SPEED_CM_S, CONFIG_C5_TX_HEADING_DEG10);
+#else
+    ESP_LOGI(TAG, "VAM source=manual UPER hex");
+#endif
+
     if (CONFIG_C5_TX_UNIX_TIME_AT_BOOT == 0) {
-        ESP_LOGW(TAG, "No UTC boot time configured: GN timestamps are uptime-based; do not use this run as timing-conformance evidence");
+        ESP_LOGW(TAG, "No UTC boot time configured: GN timestamps and generated VAM generationDeltaTime use uptime; do not use this run as timing-conformance evidence");
     }
 #ifndef CONFIG_C5_TX_ALLOW_HEADER_ONLY_PROBES
-    ESP_LOGI(TAG, "Header-only probes are disabled; profiles without valid configured UPER PDUs are skipped");
+    ESP_LOGI(TAG, "Header-only probes are disabled; non-generated profiles without configured UPER PDUs are skipped");
 #else
     ESP_LOGW(TAG, "NON-CONFORMANT header-only probe mode is enabled");
 #endif

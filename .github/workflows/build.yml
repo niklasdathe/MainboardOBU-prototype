@@ -41,6 +41,15 @@ jobs:
         run: |
           . "$IDF_PATH/export.sh"
           idf.py --version
+      - name: Test VAM UPER encoder
+        shell: bash
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror \
+            -Ifirmware/c5-tx/main \
+            firmware/c5-tx/main/vam_encoder.c \
+            firmware/c5-tx/tests/vam_encoder_test.c \
+            -o /tmp/vam_encoder_test
+          /tmp/vam_encoder_test
       - name: Build standalone ESP32-C5 TX firmware
         shell: bash
         run: |
