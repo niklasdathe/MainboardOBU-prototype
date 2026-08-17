@@ -24,16 +24,17 @@ config C5_TX_STATION_ID
     range 1 2147483647
     default 1001
     help
-        StationID used for diagnostic PDU headers and, when enabled, patched
-        into configured unsecured Facilities PDUs.
+        StationId used by generated VAMs and, when enabled, patched into
+        manually configured unsecured Facilities PDUs.
 
 config C5_TX_GN_STATION_TYPE
-    int "GeoNetworking station type"
-    range 0 31
+    int "Station type (ETSI CDD StationType)"
+    range 0 255
     default 2
     help
-        GeoNetworking station type encoded into the GN address. Value 2 is the
-        cyclist profile used by this BicycleOBU test firmware.
+        StationType used by the generated VAM BasicContainer and the low five
+        station-type bits carried by this prototype's GeoNetworking address.
+        Value 2 represents a cyclist.
 
 config C5_TX_POSITION_ACCURATE
     bool "Set GeoNetworking position accuracy indicator"
@@ -43,51 +44,71 @@ config C5_TX_LATITUDE_1E7
     int "Source latitude (1e-7 degree)"
     range -900000000 900000000
     default 0
+    help
+        Used both in the GeoNetworking source position vector and generated
+        VAM ReferencePosition.
 
 config C5_TX_LONGITUDE_1E7
     int "Source longitude (1e-7 degree)"
-    range -1800000000 1800000000
+    range -1799999999 1800000000
     default 0
+    help
+        Used both in the GeoNetworking source position vector and generated
+        VAM ReferencePosition. The CDD-reserved value -180 degrees is excluded.
 
 config C5_TX_SPEED_CM_S
     int "Source speed (cm/s)"
     range 0 16383
     default 0
+    help
+        Used both in the GeoNetworking source position vector and generated
+        VAM SpeedValue. 16383 means unavailable in the CDD.
 
 config C5_TX_HEADING_DEG10
     int "Source heading (0.1 degree)"
-    range 0 3600
+    range 0 3599
     default 0
+    help
+        Used both in the GeoNetworking source position vector and generated
+        VAM Wgs84Angle. The CDD value 3600 is explicitly prohibited.
 
 config C5_TX_UNIX_TIME_AT_BOOT
     int "UTC Unix time at boot for time-valid tests (0 = diagnostic uptime)"
     range 0 2147483647
     default 0
     help
-        For timing-sensitive interoperability tests, set this to the expected
-        UTC Unix time in seconds at power-on. If zero, GeoNetworking timestamps
-        use uptime only and are explicitly logged as diagnostic/non-time-valid.
+        Set this to the expected UTC Unix time in seconds at power-on. The
+        firmware converts it to elapsed ITS/TAI milliseconds since 2004-01-01
+        and uses it for GeoNetworking timestamps and VAM generationDeltaTime.
+        If zero, uptime is used and the run is not time-conformance evidence.
+
+config C5_TX_ITS_LEAP_SECONDS_SINCE_EPOCH
+    int "Leap seconds since the ITS epoch"
+    range 0 63
+    default 5
+    help
+        Number of positive leap seconds introduced since 2004-01-01 UTC.
+        Five covers 2005, 2008, 2012, 2015 and 2016. Update this if a later
+        leap second is introduced before the test date.
 
 config C5_TX_PATCH_STATION_ID
-    bool "Patch StationID in configured unsecured Facilities PDUs"
+    bool "Patch StationID in manually configured unsecured Facilities PDUs"
     default y
 
 config C5_TX_PATCH_GENERATION_DELTA_TIME
-    bool "Patch generationDeltaTime for CAM and VAM when UTC base is configured"
+    bool "Patch generationDeltaTime for manual CAM/VAM PDUs when UTC base is configured"
     default y
     help
-        CAM and VAM place GenerationDeltaTime directly after the six-byte
-        ItsPduHeader. The patch is only applied when C5_TX_UNIX_TIME_AT_BOOT is
-        non-zero. Do not use this with externally signed payload bytes.
+        Applies only to manually supplied CAM/VAM UPER PDUs. Generated VAMs
+        encode stationId and generationDeltaTime directly from current config.
 
 config C5_TX_ALLOW_HEADER_ONLY_PROBES
     bool "Allow header-only diagnostic probes (NON-CONFORMANT)"
     default n
     help
-        When a profile has no configured UPER PDU, generate only ItsPduHeader.
-        This is useful for receiver/classifier testing but is not a valid CAM,
-        VAM, DENM, CPM, SPATEM, MAPEM or IVIM and must not be used as conformance
-        evidence.
+        When a non-generated profile has no configured UPER PDU, generate only
+        ItsPduHeader. Useful for classifier tests, but not a valid Facilities
+        message and never suitable as conformance evidence.
 
 config C5_TX_BUTTON_TRIGGER
     bool "Send configured button profiles when BOOT is pressed"
@@ -98,14 +119,14 @@ config C5_TX_BOOT_GPIO
     range 0 31
     default 28
     help
-        Seeed Studio XIAO ESP32-C5 BOOT button is GPIO28 and is active low.
+        Seeed Studio XIAO ESP32-C5 BOOT button is GPIO28 and active low.
 
 config C5_TX_LED_GPIO
     int "User LED GPIO"
     range 0 31
     default 27
     help
-        Seeed Studio XIAO ESP32-C5 user LED is GPIO27 and is active low.
+        Seeed Studio XIAO ESP32-C5 user LED is GPIO27 and active low.
 
 config C5_TX_PERIODIC_ENABLE
     bool "Enable periodic profile scheduling"
@@ -176,9 +197,72 @@ config C5_TX_VAM_INTERVAL_MS
     int "VAM interval (ms)"
     range 100 3600000
     default 1000
+
+choice C5_TX_VAM_PDU_SOURCE
+    prompt "VAM Facilities PDU source"
+    default C5_TX_VAM_GENERATED
+config C5_TX_VAM_GENERATED
+    bool "Generate a minimal ETSI VAM from menuconfig fields"
+    help
+        Generates a UPER VAM with protocolVersion 3, MessageId 16,
+        BasicContainer and VruHighFrequencyContainer. Global station ID,
+        station type, position, speed and heading fields are reused so the
+        Facilities and GeoNetworking data describe the same test state.
+config C5_TX_VAM_MANUAL_PDU
+    bool "Use manually supplied complete VAM UPER hex"
+endchoice
+
 config C5_TX_VAM_PDU_HEX
-    string "VAM Facilities UPER PDU (hex, empty = disabled unless probe mode)"
+    string "Manual VAM Facilities UPER PDU (hex)"
     default ""
+    depends on C5_TX_VAM_MANUAL_PDU
+
+config C5_TX_VAM_POSITION_SEMI_MAJOR_CONFIDENCE_CM
+    int "Position semi-major confidence (cm; 4095 = unavailable)"
+    range 0 4095
+    default 4095
+
+config C5_TX_VAM_POSITION_SEMI_MINOR_CONFIDENCE_CM
+    int "Position semi-minor confidence (cm; 4095 = unavailable)"
+    range 0 4095
+    default 4095
+
+config C5_TX_VAM_POSITION_SEMI_MAJOR_ORIENTATION_DEG10
+    int "Position confidence ellipse orientation (0.1 degree; 3601 = unavailable)"
+    range 0 3601
+    default 3601
+    help
+        CDD value 3600 is prohibited and will be rejected at runtime.
+
+config C5_TX_VAM_ALTITUDE_CM
+    int "Altitude above reference ellipsoid (cm; 800001 = unavailable)"
+    range -100000 800001
+    default 800001
+
+config C5_TX_VAM_ALTITUDE_CONFIDENCE
+    int "Altitude confidence enum (0..15; 15 = unavailable)"
+    range 0 15
+    default 15
+
+config C5_TX_VAM_HEADING_CONFIDENCE_DEG10
+    int "Heading confidence (0.1 degree; 127 = unavailable)"
+    range 1 127
+    default 127
+
+config C5_TX_VAM_SPEED_CONFIDENCE_CM_S
+    int "Speed confidence (cm/s; 127 = unavailable)"
+    range 1 127
+    default 127
+
+config C5_TX_VAM_LONGITUDINAL_ACCELERATION_DM_S2
+    int "Longitudinal acceleration (0.1 m/s^2; 161 = unavailable)"
+    range -160 161
+    default 0
+
+config C5_TX_VAM_LONGITUDINAL_ACCELERATION_CONFIDENCE_DM_S2
+    int "Longitudinal acceleration confidence (0.1 m/s^2; 102 = unavailable)"
+    range 0 102
+    default 102
 endmenu
 
 menu "DENM profile"
