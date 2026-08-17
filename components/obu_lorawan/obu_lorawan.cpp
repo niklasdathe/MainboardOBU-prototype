@@ -132,19 +132,23 @@ static bool ensure_radio(obu_lorawan_t *u)
 {
     if (u->radio_ready) return true;
 
-    u->hal = new (std::nothrow) EspHal((int8_t)u->config.sck_gpio,
-                                       (int8_t)u->config.miso_gpio,
-                                       (int8_t)u->config.mosi_gpio,
-                                       u->config.host,
-                                       u->config.spi_clock_hz);
-    if (u->hal == nullptr) return false;
+    if (u->hal == nullptr) {
+        u->hal = new (std::nothrow) EspHal((int8_t)u->config.sck_gpio,
+                                           (int8_t)u->config.miso_gpio,
+                                           (int8_t)u->config.mosi_gpio,
+                                           u->config.host,
+                                           u->config.spi_clock_hz);
+        if (u->hal == nullptr) return false;
+    }
 
-    u->module = new (std::nothrow) Module(u->hal,
-                                          (uint32_t)u->config.nss_gpio,
-                                          (uint32_t)u->config.dio1_gpio,
-                                          (uint32_t)u->config.reset_gpio,
-                                          (uint32_t)u->config.busy_gpio);
-    if (u->module == nullptr) return false;
+    if (u->module == nullptr) {
+        u->module = new (std::nothrow) Module(u->hal,
+                                              (uint32_t)u->config.nss_gpio,
+                                              (uint32_t)u->config.dio1_gpio,
+                                              (uint32_t)u->config.reset_gpio,
+                                              (uint32_t)u->config.busy_gpio);
+        if (u->module == nullptr) return false;
+    }
 
     /*
      * Seeed's XIAO ESP32-S3 + Wio-SX1262 BSP controls the board-level RF
@@ -152,8 +156,10 @@ static bool ensure_radio(obu_lorawan_t *u)
      */
     u->module->setRfSwitchPins(SEEED_WIO_RF_SW1_GPIO, RADIOLIB_NC);
 
-    u->radio = new (std::nothrow) SX1262(u->module);
-    if (u->radio == nullptr) return false;
+    if (u->radio == nullptr) {
+        u->radio = new (std::nothrow) SX1262(u->module);
+        if (u->radio == nullptr) return false;
+    }
 
     /*
      * Seeed's official SX1262 BSP configures the DIO3-controlled TCXO rail at
@@ -174,8 +180,10 @@ static bool ensure_radio(obu_lorawan_t *u)
         return false;
     }
 
-    u->node = new (std::nothrow) LoRaWANNode(u->radio, &EU868, 0);
-    if (u->node == nullptr) return false;
+    if (u->node == nullptr) {
+        u->node = new (std::nothrow) LoRaWANNode(u->radio, &EU868, 0);
+        if (u->node == nullptr) return false;
+    }
 
     uint64_t join_eui = 0;
     uint64_t dev_eui = 0;
@@ -339,6 +347,18 @@ extern "C" esp_err_t obu_lorawan_start(const obu_lorawan_config_t *config, obu_l
     if (!config->enabled) {
         ESP_LOGI(TAG, "Wio-SX1262 LoRaWAN uplink disabled");
         return ESP_OK;
+    }
+
+    uint64_t join_eui = 0;
+    uint64_t dev_eui = 0;
+    uint8_t nwk_key[16];
+    uint8_t app_key[16];
+    if (!credentials_valid(config, &join_eui, &dev_eui, nwk_key, app_key)) {
+        ESP_LOGE(TAG,
+                 "LoRaWAN start rejected: JoinEUI/DevEUI need 16 hex digits and both keys need 32");
+        delete u;
+        *out = nullptr;
+        return ESP_ERR_INVALID_ARG;
     }
 
     u->queue = xQueueCreate(config->queue_depth, sizeof(queued_frame_t));
