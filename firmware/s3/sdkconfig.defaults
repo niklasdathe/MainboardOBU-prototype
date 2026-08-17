@@ -12,6 +12,13 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 # development firmware size and can be reduced again once TLS is resolved.
 CONFIG_LOG_MAXIMUM_LEVEL_VERBOSE=y
 
+# Direct OTM uploads always have a public DNS fallback available. DHCP still
+# supplies the main/backup resolvers; 1.1.1.1 is used only when those cannot
+# resolve the broker. OBU_OTM_DIRECT_ENABLE also selects the enable symbol in
+# Kconfig so stale generated sdkconfig files cannot disable the fallback.
+CONFIG_OBU_DNS_FALLBACK_ENABLE=y
+CONFIG_OBU_DNS_FALLBACK_IPV4="1.1.1.1"
+
 # The S3 hub links Wi-Fi/MQTT TLS, FAT/SD, GNSS/time, HMI and warning drivers.
 # ESP-IDF's default 1 MiB factory partition is too small. Use the standard
 # 1.5 MiB single-app development layout; OTA is intentionally not implemented
