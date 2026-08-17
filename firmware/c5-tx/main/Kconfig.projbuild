@@ -1,0 +1,279 @@
+menu "BicycleOBU C5 TX test transmitter"
+
+config C5_TX_ENABLED
+    bool "Enable V2X transmission"
+    default y
+    help
+        Enables the standalone ESP32-C5 transmitter. This firmware is intended
+        for controlled development and interoperability testing.
+
+config C5_TX_FREQUENCY_MHZ
+    int "ITS-G5 center frequency (MHz)"
+    range 5860 5900
+    default 5900
+    help
+        Center frequency passed to the existing ESP32-C5 802.11p radio driver.
+        The driver accepts 10 MHz steps between 5860 and 5900 MHz.
+
+config C5_TX_SOURCE_MAC
+    string "802.11 source MAC"
+    default "02:00:00:00:C5:01"
+
+config C5_TX_STATION_ID
+    int "ITS station ID"
+    range 1 2147483647
+    default 1001
+    help
+        StationID used for diagnostic PDU headers and, when enabled, patched
+        into configured unsecured Facilities PDUs.
+
+config C5_TX_GN_STATION_TYPE
+    int "GeoNetworking station type"
+    range 0 31
+    default 2
+    help
+        GeoNetworking station type encoded into the GN address. Value 2 is the
+        cyclist profile used by this BicycleOBU test firmware.
+
+config C5_TX_POSITION_ACCURATE
+    bool "Set GeoNetworking position accuracy indicator"
+    default n
+
+config C5_TX_LATITUDE_1E7
+    int "Source latitude (1e-7 degree)"
+    range -900000000 900000000
+    default 0
+
+config C5_TX_LONGITUDE_1E7
+    int "Source longitude (1e-7 degree)"
+    range -1800000000 1800000000
+    default 0
+
+config C5_TX_SPEED_CM_S
+    int "Source speed (cm/s)"
+    range 0 16383
+    default 0
+
+config C5_TX_HEADING_DEG10
+    int "Source heading (0.1 degree)"
+    range 0 3600
+    default 0
+
+config C5_TX_UNIX_TIME_AT_BOOT
+    int "UTC Unix time at boot for time-valid tests (0 = diagnostic uptime)"
+    range 0 2147483647
+    default 0
+    help
+        For timing-sensitive interoperability tests, set this to the expected
+        UTC Unix time in seconds at power-on. If zero, GeoNetworking timestamps
+        use uptime only and are explicitly logged as diagnostic/non-time-valid.
+
+config C5_TX_PATCH_STATION_ID
+    bool "Patch StationID in configured unsecured Facilities PDUs"
+    default y
+
+config C5_TX_PATCH_GENERATION_DELTA_TIME
+    bool "Patch generationDeltaTime for CAM and VAM when UTC base is configured"
+    default y
+    help
+        CAM and VAM place GenerationDeltaTime directly after the six-byte
+        ItsPduHeader. The patch is only applied when C5_TX_UNIX_TIME_AT_BOOT is
+        non-zero. Do not use this with externally signed payload bytes.
+
+config C5_TX_ALLOW_HEADER_ONLY_PROBES
+    bool "Allow header-only diagnostic probes (NON-CONFORMANT)"
+    default n
+    help
+        When a profile has no configured UPER PDU, generate only ItsPduHeader.
+        This is useful for receiver/classifier testing but is not a valid CAM,
+        VAM, DENM, CPM, SPATEM, MAPEM or IVIM and must not be used as conformance
+        evidence.
+
+config C5_TX_BUTTON_TRIGGER
+    bool "Send configured button profiles when BOOT is pressed"
+    default y
+
+config C5_TX_BOOT_GPIO
+    int "BOOT button GPIO"
+    range 0 31
+    default 28
+    help
+        Seeed Studio XIAO ESP32-C5 BOOT button is GPIO28 and is active low.
+
+config C5_TX_LED_GPIO
+    int "User LED GPIO"
+    range 0 31
+    default 27
+    help
+        Seeed Studio XIAO ESP32-C5 user LED is GPIO27 and is active low.
+
+config C5_TX_PERIODIC_ENABLE
+    bool "Enable periodic profile scheduling"
+    default n
+    help
+        Global gate for periodic transmission. Individual profiles also have a
+        periodic enable and interval.
+
+config C5_TX_STARTUP_TRIGGER
+    bool "Send button-enabled profiles once after startup"
+    default n
+
+config C5_TX_INTERFRAME_GAP_MS
+    int "Gap between profiles in a button/startup burst (ms)"
+    range 10 5000
+    default 100
+
+config C5_TX_GBC_DISTANCE_A_M
+    int "DENM GeoBroadcast distance A (m)"
+    range 1 65535
+    default 500
+
+config C5_TX_GBC_DISTANCE_B_M
+    int "DENM GeoBroadcast distance B (m)"
+    range 1 65535
+    default 500
+
+config C5_TX_GBC_ANGLE_DEG10
+    int "DENM GeoBroadcast angle (0.1 degree)"
+    range 0 3600
+    default 0
+
+config C5_TX_GBC_SHAPE
+    int "DENM GeoBroadcast shape subtype (0 circle, 1 rectangle, 2 ellipse)"
+    range 0 2
+    default 0
+
+menu "CAM profile"
+config C5_TX_CAM_ENABLE
+    bool "Enable CAM profile"
+    default y
+config C5_TX_CAM_BUTTON
+    bool "Send CAM on BOOT trigger"
+    default y
+config C5_TX_CAM_PERIODIC
+    bool "Schedule CAM periodically"
+    default y
+config C5_TX_CAM_INTERVAL_MS
+    int "CAM interval (ms)"
+    range 100 3600000
+    default 1000
+config C5_TX_CAM_PDU_HEX
+    string "CAM Facilities UPER PDU (hex, empty = disabled unless probe mode)"
+    default ""
+endmenu
+
+menu "VAM profile"
+config C5_TX_VAM_ENABLE
+    bool "Enable VAM profile"
+    default y
+config C5_TX_VAM_BUTTON
+    bool "Send VAM on BOOT trigger"
+    default y
+config C5_TX_VAM_PERIODIC
+    bool "Schedule VAM periodically"
+    default y
+config C5_TX_VAM_INTERVAL_MS
+    int "VAM interval (ms)"
+    range 100 3600000
+    default 1000
+config C5_TX_VAM_PDU_HEX
+    string "VAM Facilities UPER PDU (hex, empty = disabled unless probe mode)"
+    default ""
+endmenu
+
+menu "DENM profile"
+config C5_TX_DENM_ENABLE
+    bool "Enable DENM profile"
+    default y
+config C5_TX_DENM_BUTTON
+    bool "Send DENM on BOOT trigger"
+    default y
+config C5_TX_DENM_PERIODIC
+    bool "Schedule DENM periodically"
+    default n
+config C5_TX_DENM_INTERVAL_MS
+    int "DENM replay interval (ms)"
+    range 100 3600000
+    default 5000
+config C5_TX_DENM_PDU_HEX
+    string "DENM Facilities UPER PDU (hex, empty = disabled unless probe mode)"
+    default ""
+endmenu
+
+menu "CPM profile"
+config C5_TX_CPM_ENABLE
+    bool "Enable CPM profile"
+    default y
+config C5_TX_CPM_BUTTON
+    bool "Send CPM on BOOT trigger"
+    default n
+config C5_TX_CPM_PERIODIC
+    bool "Schedule CPM periodically"
+    default n
+config C5_TX_CPM_INTERVAL_MS
+    int "CPM interval (ms)"
+    range 100 3600000
+    default 1000
+config C5_TX_CPM_PDU_HEX
+    string "CPM Facilities UPER PDU (hex, empty = disabled unless probe mode)"
+    default ""
+endmenu
+
+menu "SPATEM profile"
+config C5_TX_SPATEM_ENABLE
+    bool "Enable SPATEM profile"
+    default y
+config C5_TX_SPATEM_BUTTON
+    bool "Send SPATEM on BOOT trigger"
+    default n
+config C5_TX_SPATEM_PERIODIC
+    bool "Schedule SPATEM periodically"
+    default n
+config C5_TX_SPATEM_INTERVAL_MS
+    int "SPATEM interval (ms)"
+    range 100 3600000
+    default 1000
+config C5_TX_SPATEM_PDU_HEX
+    string "SPATEM Facilities UPER PDU (hex, empty = disabled unless probe mode)"
+    default ""
+endmenu
+
+menu "MAPEM profile"
+config C5_TX_MAPEM_ENABLE
+    bool "Enable MAPEM profile"
+    default y
+config C5_TX_MAPEM_BUTTON
+    bool "Send MAPEM on BOOT trigger"
+    default n
+config C5_TX_MAPEM_PERIODIC
+    bool "Schedule MAPEM periodically"
+    default n
+config C5_TX_MAPEM_INTERVAL_MS
+    int "MAPEM interval (ms)"
+    range 100 3600000
+    default 1000
+config C5_TX_MAPEM_PDU_HEX
+    string "MAPEM Facilities UPER PDU (hex, empty = disabled unless probe mode)"
+    default ""
+endmenu
+
+menu "IVIM profile"
+config C5_TX_IVIM_ENABLE
+    bool "Enable IVIM profile"
+    default y
+config C5_TX_IVIM_BUTTON
+    bool "Send IVIM on BOOT trigger"
+    default n
+config C5_TX_IVIM_PERIODIC
+    bool "Schedule IVIM periodically"
+    default n
+config C5_TX_IVIM_INTERVAL_MS
+    int "IVIM interval (ms)"
+    range 100 3600000
+    default 5000
+config C5_TX_IVIM_PDU_HEX
+    string "IVIM Facilities UPER PDU (hex, empty = disabled unless probe mode)"
+    default ""
+endmenu
+
+endmenu
