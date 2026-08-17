@@ -64,6 +64,26 @@ config OBU_WIFI_DEBUG
         This option does not intentionally change connection policy and should
         normally remain disabled outside troubleshooting sessions.
 
+config OBU_DNS_FALLBACK_ENABLE
+    bool "Enable fallback DNS for the OpenTrafficMap uploader"
+    depends on OBU_OTM_DIRECT_ENABLE
+    default y
+    help
+        Install a static ESP-NETIF fallback DNS server after DHCP completes.
+        DHCP still controls the main and backup DNS servers; this fallback is
+        used to improve development uploader reliability on hotspots or routers
+        whose DHCP-provided DNS relay is unavailable or unreliable.
+
+config OBU_DNS_FALLBACK_IPV4
+    string "Fallback DNS IPv4 address"
+    depends on OBU_DNS_FALLBACK_ENABLE
+    default "1.1.1.1"
+    help
+        IPv4 address used for ESP_NETIF_DNS_FALLBACK. The default is the
+        Cloudflare public resolver. Change this for networks that require a
+        different resolver or disable OBU_DNS_FALLBACK_ENABLE to use only the
+        DNS servers supplied by DHCP.
+
 config OBU_OTM_TLS_TRACE
     bool "Enable verbose OpenTrafficMap TLS handshake tracing"
     depends on OBU_OTM_DIRECT_ENABLE
