@@ -15,6 +15,8 @@ static const char *TAG = "obu_lorawan";
 static constexpr uint8_t FRAG_MAGIC_0 = 0x42;  // 'B'
 static constexpr uint8_t FRAG_MAGIC_1 = 0x4f;  // 'O'
 static constexpr size_t FRAG_HEADER_BYTES = OBU_LORAWAN_FRAGMENT_HEADER_BYTES;
+static constexpr uint32_t SEEED_WIO_RF_SW1_GPIO = 38U;
+static constexpr float SEEED_WIO_TCXO_VOLTAGE = 3.0f;
 
 typedef struct {
     uint16_t len;
@@ -144,17 +146,23 @@ static bool ensure_radio(obu_lorawan_t *u)
                                           (uint32_t)u->config.busy_gpio);
     if (u->module == nullptr) return false;
 
+    /*
+     * Seeed's XIAO ESP32-S3 + Wio-SX1262 BSP controls the board-level RF
+     * switch with GPIO38. RadioLib owns the pin once this is configured.
+     */
+    u->module->setRfSwitchPins(SEEED_WIO_RF_SW1_GPIO, RADIOLIB_NC);
+
     u->radio = new (std::nothrow) SX1262(u->module);
     if (u->radio == nullptr) return false;
 
     /*
-     * Seeed Wio-SX1262 uses a TCXO driven from DIO3. The module datasheet
-     * specifies software configuration of that rail; 1.8 V is the value used
-     * by working XIAO/Wio-SX1262 board definitions.
+     * Seeed's official SX1262 BSP configures the DIO3-controlled TCXO rail at
+     * 3.0 V. Keep that value here rather than relying on unrelated board
+     * definitions with different oscillator supplies.
      */
     int16_t state = u->radio->begin(868.0, 125.0, 9, 7,
                                     RADIOLIB_SX126X_SYNC_WORD_PRIVATE,
-                                    10, 8, 1.8, false);
+                                    10, 8, SEEED_WIO_TCXO_VOLTAGE, false);
     if (state != RADIOLIB_ERR_NONE) {
         ESP_LOGE(TAG, "SX1262 initialization failed: RadioLib state=%d", (int)state);
         return false;
@@ -189,11 +197,12 @@ static bool ensure_radio(obu_lorawan_t *u)
 
     u->radio_ready = true;
     ESP_LOGI(TAG,
-             "Wio-SX1262 ready on shared SPI%d: SCK=%d MISO=%d MOSI=%d NSS=%d DIO1=%d RESET=%d BUSY=%d",
+             "Wio-SX1262 ready on shared SPI%d: SCK=%d MISO=%d MOSI=%d NSS=%d DIO1=%d RESET=%d BUSY=%d RF_SW1=%u TCXO=%.1fV",
              (int)u->config.host,
              u->config.sck_gpio, u->config.miso_gpio, u->config.mosi_gpio,
              u->config.nss_gpio, u->config.dio1_gpio,
-             u->config.reset_gpio, u->config.busy_gpio);
+             u->config.reset_gpio, u->config.busy_gpio,
+             (unsigned)SEEED_WIO_RF_SW1_GPIO, (double)SEEED_WIO_TCXO_VOLTAGE);
     return true;
 }
 
