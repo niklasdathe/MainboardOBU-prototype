@@ -19,7 +19,6 @@
 #include "obu_ifaces.h"
 #include "obu_ipc.h"
 #include "obu_log.h"
-#include "obu_otm.h"
 #include "obu_time.h"
 #include "obu_v2x.h"
 #include "obu_warning.h"
@@ -30,7 +29,6 @@ static obu_ipc_endpoint_t *ipc;
 static obu_display_driver_t display;
 static obu_time_service_t timesvc;
 static obu_diag_logger_t *logger;
-static obu_otm_t *otm;
 static obu_hmi_model_t hmi;
 static obu_warning_output_t buzzer_output;
 static obu_warning_controller_t warning_controller;
@@ -271,7 +269,6 @@ static void ingest_ipc(const obu_ipc_message_t *m)
         memcpy(e->payload + sizeof(w.meta), frame, w.frame_len);
         stamp_event_utc(e);
         (void)obu_bus_publish(&bus, e);
-        if (otm) (void)obu_otm_publish_live_frame(otm, frame, w.frame_len);
     } else if (m->type == OBU_IPC_RADIO_STATUS && m->payload_len >= sizeof(obu_radio_status_t)) {
         obu_radio_status_t s;
         memcpy(&s, m->payload, sizeof(s));
@@ -615,20 +612,6 @@ void app_main(void)
         .bus_already_initialized = true,
     };
     if (obu_diag_logger_start(&lc, &logger) != ESP_OK) ESP_LOGW(TAG, "SD diagnostic log unavailable");
-
-#ifdef CONFIG_OBU_OTM_DIRECT_ENABLE
-    const bool otm_direct_enabled = true;
-#else
-    const bool otm_direct_enabled = false;
-#endif
-    obu_otm_wifi_config_t oc = {
-        .enabled = otm_direct_enabled,
-        .wifi_ssid = CONFIG_OBU_WIFI_SSID,
-        .wifi_password = CONFIG_OBU_WIFI_PASSWORD,
-        .broker_uri = "mqtts://cits1.opentrafficmap.org",
-        .node_id = CONFIG_OBU_OTM_NODE_ID,
-    };
-    if (obu_otm_wifi_start(&oc, &otm) != ESP_OK) ESP_LOGW(TAG, "OTM uploader not started");
 
     publish_startup_status();
     if (display.ops != NULL && xTaskCreate(hmi_task, "hmi", 4096, NULL, 5, NULL) != pdPASS) abort();
