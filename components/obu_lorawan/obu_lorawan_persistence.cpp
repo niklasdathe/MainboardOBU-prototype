@@ -22,6 +22,7 @@ struct persistence_context_t {
     bool healthy = false;
     bool persistence_present = false;
     bool session_present = false;
+    bool session_loaded = false;
     bool persistence_cache_valid = false;
     bool session_cache_valid = false;
     uint8_t persistence_cache[RADIOLIB_LORAWAN_PERSISTENCE_BUF_SIZE] = {};
@@ -208,8 +209,8 @@ esp_err_t obu_lorawan_persistence_prepare(void)
 }
 
 esp_err_t obu_lorawan_persistence_attach(LoRaWANNode *node,
-                                           bool *restored_persistence,
-                                           bool *restored_session)
+                                         bool *restored_persistence,
+                                         bool *restored_session)
 {
     if (node == nullptr) return ESP_ERR_INVALID_ARG;
     if (restored_persistence != nullptr) *restored_persistence = false;
@@ -221,7 +222,7 @@ esp_err_t obu_lorawan_persistence_attach(LoRaWANNode *node,
     if (s_ctx.attached) {
         if (s_ctx.node != node) return ESP_ERR_INVALID_STATE;
         if (restored_persistence != nullptr) *restored_persistence = s_ctx.persistence_present;
-        if (restored_session != nullptr) *restored_session = s_ctx.session_present && node->isActivated();
+        if (restored_session != nullptr) *restored_session = s_ctx.session_loaded;
         return s_ctx.healthy ? ESP_OK : ESP_ERR_INVALID_STATE;
     }
 
@@ -246,15 +247,16 @@ esp_err_t obu_lorawan_persistence_attach(LoRaWANNode *node,
                      (int)state);
             return ESP_ERR_INVALID_STATE;
         }
+        s_ctx.session_loaded = s_ctx.session_present;
     }
 
     if (restored_persistence != nullptr) *restored_persistence = s_ctx.persistence_present;
-    if (restored_session != nullptr) *restored_session = s_ctx.session_present && node->isActivated();
+    if (restored_session != nullptr) *restored_session = s_ctx.session_loaded;
 
     ESP_LOGI(TAG,
              "RadioLib persistence attached: nonce_state=%s session_restored=%s",
              s_ctx.persistence_present ? "restored" : "new",
-             (s_ctx.session_present && node->isActivated()) ? "yes" : "no");
+             s_ctx.session_loaded ? "yes" : "no");
     return ESP_OK;
 }
 
