@@ -31,6 +31,23 @@ jobs:
           idf.py -C firmware/c5 set-target esp32c5
           idf.py -C firmware/c5 build
 
+  build-c5-tx:
+    runs-on: ubuntu-latest
+    container: espressif/idf:release-v6.1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify ESP-IDF 6.1
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          idf.py --version
+      - name: Build standalone ESP32-C5 TX firmware
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          idf.py -C firmware/c5-tx set-target esp32c5
+          idf.py -C firmware/c5-tx build
+
   build-s3:
     runs-on: ubuntu-latest
     container: espressif/idf:release-v6.1
