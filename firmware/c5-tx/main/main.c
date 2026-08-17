@@ -278,7 +278,7 @@ static bool its_time_ms(uint64_t *out_ms)
 
 static uint32_t gn_timestamp_ms(void)
 {
-    uint64_t value;
+    uint64_t value = 0;
     if (its_time_ms(&value)) return (uint32_t)value;
     return (uint32_t)((uint64_t)esp_timer_get_time() / 1000ULL);
 }
@@ -342,7 +342,7 @@ static bool load_facilities_pdu(tx_profile_t *profile, size_t *out_len)
 
 #if defined(CONFIG_C5_TX_PATCH_GENERATION_DELTA_TIME)
     if (profile->patch_generation_delta_time && length >= ITS_PDU_HEADER_LEN + 2u) {
-        uint64_t now_its_ms;
+        uint64_t now_its_ms = 0;
         if (its_time_ms(&now_its_ms)) {
             write_be16(pdu_buffer + ITS_PDU_HEADER_LEN, (uint16_t)(now_its_ms & 0xffffu));
         }
