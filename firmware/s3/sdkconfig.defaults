@@ -1,33 +1,11 @@
 # Seeed Studio XIAO ESP32-S3 prototype hardware: 8 MB flash.
 CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
 
-# app_main performs I2C/RTC, SPI IPC, GNSS, SD and optional Wi-Fi/MQTT setup
-# before remaining alive as the S3 IPC receive loop. Keep enough stack for
-# that initialization path on ESP-IDF 5.5.
+# app_main performs I2C/RTC, SPI IPC, GNSS, SD, HMI and warning setup before
+# remaining alive as the S3 IPC receive loop. Keep conservative stack headroom.
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 
-# Keep the normal runtime log level at INFO, but compile verbose log statements
-# into development images so CONFIG_OBU_OTM_TLS_TRACE can expose the complete
-# mbedTLS handshake when diagnosing broker interoperability. This increases
-# development firmware size and can be reduced again once TLS is resolved.
-CONFIG_LOG_MAXIMUM_LEVEL_VERBOSE=y
-
-# Direct OTM uploads always have a public DNS fallback available. DHCP still
-# supplies the main/backup resolvers; 1.1.1.1 is used only when those cannot
-# resolve the broker. OBU_OTM_DIRECT_ENABLE also selects the enable symbol in
-# Kconfig so stale generated sdkconfig files cannot disable the fallback.
-CONFIG_OBU_DNS_FALLBACK_ENABLE=y
-CONFIG_OBU_DNS_FALLBACK_IPV4="1.1.1.1"
-
-# Phone hotspots increasingly provide useful IPv6 connectivity and DNS through
-# Router Advertisements even when their IPv4 DNS relay/NAT path is restricted.
-# Enable SLAAC and accept up to two RDNSS servers so the OTM resolver recovery
-# path can use IPv6-provided DNS without requiring DHCPv6 stateful addressing.
-CONFIG_LWIP_IPV6_AUTOCONFIG=y
-CONFIG_LWIP_IPV6_RDNSS_MAX_DNS_SERVERS=2
-
-# The S3 hub links Wi-Fi/MQTT TLS, FAT/SD, GNSS/time, HMI and warning drivers.
-# ESP-IDF's default 1 MiB factory partition is too small. Use the standard
-# 1.5 MiB single-app development layout; OTA is intentionally not implemented
-# in this prototype firmware yet.
+# The S3 hub links FAT/SD, GNSS/time, HMI and warning drivers. Keep the larger
+# single-app development layout for prototype growth; OTA is intentionally not
+# implemented in this prototype firmware yet.
 CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
