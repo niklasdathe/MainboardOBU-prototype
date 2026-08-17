@@ -238,6 +238,45 @@ static bool ensure_joined(obu_lorawan_t *u)
     return false;
 }
 
+static int16_t send_payload_when_allowed(obu_lorawan_t *u,
+                                         const uint8_t *payload,
+                                         size_t payload_len,
+                                         uint16_t frame_sequence,
+                                         uint8_t fragment_index,
+                                         uint8_t fragment_count)
+{
+    for (;;) {
+        RadioLibTime_t wait_ms = u->node->timeUntilUplink();
+        if (wait_ms > 0) {
+            ESP_LOGI(TAG,
+                     "LoRaWAN duty-cycle wait: frame=%u fragment=%u/%u wait=%lu ms",
+                     (unsigned)frame_sequence,
+                     (unsigned)(fragment_index + 1U),
+                     (unsigned)fragment_count,
+                     (unsigned long)wait_ms);
+            vTaskDelay(pdMS_TO_TICKS((uint32_t)wait_ms));
+        }
+
+        const int16_t state = u->node->sendReceive(payload,
+                                                    payload_len,
+                                                    u->config.fport,
+                                                    false);
+        if (state != RADIOLIB_ERR_UPLINK_UNAVAILABLE) return state;
+
+        /*
+         * The duty-cycle deadline may move slightly between the availability
+         * query and sendReceive(). Never turn that scheduling race into a lost
+         * fragment: recompute the legal delay and retry the same bytes.
+         */
+        wait_ms = u->node->timeUntilUplink();
+        if (wait_ms == 0) wait_ms = 1;
+        ESP_LOGD(TAG,
+                 "LoRaWAN uplink became unavailable before TX; retrying fragment after %lu ms",
+                 (unsigned long)wait_ms);
+        vTaskDelay(pdMS_TO_TICKS((uint32_t)wait_ms));
+    }
+}
+
 static bool send_frame(obu_lorawan_t *u, const queued_frame_t *frame)
 {
     const uint8_t data_bytes = u->config.fragment_data_bytes;
@@ -263,10 +302,12 @@ static bool send_frame(obu_lorawan_t *u, const queued_frame_t *frame)
         put_u16_be(payload + 10, crc);
         memcpy(payload + FRAG_HEADER_BYTES, frame->data + offset, part_len);
 
-        int16_t state = u->node->sendReceive(payload,
-                                              FRAG_HEADER_BYTES + part_len,
-                                              u->config.fport,
-                                              false);
+        const int16_t state = send_payload_when_allowed(u,
+                                                        payload,
+                                                        FRAG_HEADER_BYTES + part_len,
+                                                        frame_sequence,
+                                                        fragment_index,
+                                                        fragment_count);
         if (state < RADIOLIB_ERR_NONE) {
             stats_inc(&u->stats.tx_errors, &u->stats_lock);
             ESP_LOGW(TAG,
