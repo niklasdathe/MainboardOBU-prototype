@@ -80,7 +80,7 @@ config OBU_DNS_FALLBACK_ENABLE
 
 config OBU_DNS_FALLBACK_IPV4
     string "Fallback DNS IPv4 address"
-    depends on OBU_OTM_DIRECT_ENABLE
+    depends on OBU_DNS_FALLBACK_ENABLE
     default "1.1.1.1"
     help
         IPv4 address used for ESP_NETIF_DNS_FALLBACK. DHCP continues to control
