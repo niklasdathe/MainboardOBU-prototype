@@ -5,6 +5,10 @@ CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
 # remaining alive as the S3 IPC receive loop. Keep conservative stack headroom.
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 
+# RadioLib's native ESP-IDF LoRaWAN HAL requires millisecond scheduler
+# resolution so the Class A RX1/RX2 windows can be opened reliably.
+CONFIG_FREERTOS_HZ=1000
+
 # The S3 hub links FAT/SD, GNSS/time, HMI and warning drivers. Keep the larger
 # single-app development layout for prototype growth; OTA is intentionally not
 # implemented in this prototype firmware yet.
