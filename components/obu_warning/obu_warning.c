@@ -148,7 +148,7 @@ static esp_err_t buzzer_notify(obu_warning_output_t *output,
         .frequency_hz = buzzer->default_frequency_hz,
         .duration_ms = buzzer->default_duration_ms,
     };
-    return xQueueSend(buzzer->queue, &pattern, 0) == pdTRUE ? ESP_OK : ESP_ERR_TIMEOUT;
+    return xQueueSendToFront(buzzer->queue, &pattern, 0) == pdTRUE ? ESP_OK : ESP_ERR_TIMEOUT;
 }
 
 static esp_err_t buzzer_set_enabled(obu_warning_output_t *output, bool enabled)
@@ -182,6 +182,33 @@ static const obu_warning_output_ops_t buzzer_ops = {
     .set_enabled = buzzer_set_enabled,
     .set_muted = buzzer_set_muted,
 };
+
+esp_err_t obu_expansion_buzzer_pulse(obu_warning_output_t *output,
+                                     uint32_t frequency_hz,
+                                     uint32_t duration_ms)
+{
+    if (output == NULL || output->ctx == NULL || frequency_hz < 100u ||
+        frequency_hz > 10000u || duration_ms == 0u) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    expansion_buzzer_t *buzzer = output->ctx;
+    if (!buzzer->enabled || buzzer->muted) {
+        return ESP_OK;
+    }
+
+    /* Keep one queue slot free for warning audio. Geiger/diagnostic ticks are
+     * intentionally lossy when arrivals exceed what the buzzer can represent. */
+    if (uxQueueSpacesAvailable(buzzer->queue) <= 1u) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    const buzzer_pattern_t pattern = {
+        .frequency_hz = frequency_hz,
+        .duration_ms = duration_ms,
+    };
+    return xQueueSend(buzzer->queue, &pattern, 0) == pdTRUE ? ESP_OK : ESP_ERR_TIMEOUT;
+}
 
 esp_err_t obu_expansion_buzzer_create(const obu_expansion_buzzer_config_t *config,
                                       obu_warning_output_t *out)

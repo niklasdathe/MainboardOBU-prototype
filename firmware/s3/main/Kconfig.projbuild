@@ -27,6 +27,27 @@ config OBU_BUZZER_DURATION_MS
     range 20 1000
     default 120
 
+config OBU_GEIGER_COUNTER_ENABLE
+    bool "Enable V2X Geiger counter mode"
+    depends on OBU_BUZZER_ENABLE
+    default n
+    help
+        Emit a short best-effort buzzer tick for each received ETSI
+        GeoNetworking V2X packet. Diagnostic ticks never block the receive path
+        and may be dropped under heavy traffic so warning audio keeps priority.
+
+config OBU_GEIGER_COUNTER_FREQUENCY_HZ
+    int "V2X Geiger counter frequency (Hz)"
+    depends on OBU_GEIGER_COUNTER_ENABLE
+    range 100 10000
+    default 3200
+
+config OBU_GEIGER_COUNTER_DURATION_MS
+    int "V2X Geiger counter pulse duration (ms)"
+    depends on OBU_GEIGER_COUNTER_ENABLE
+    range 10 200
+    default 25
+
 config OBU_OTM_DIRECT_ENABLE
     bool "Enable direct OpenTrafficMap Wi-Fi uploader"
     default n

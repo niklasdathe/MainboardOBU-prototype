@@ -82,6 +82,16 @@ esp_err_t obu_warning_controller_handle(obu_warning_controller_t *controller,
 esp_err_t obu_expansion_buzzer_create(const obu_expansion_buzzer_config_t *config,
                                       obu_warning_output_t *out);
 
+/*
+ * Queue a short non-warning pulse on an Expansion Base buzzer. This call is
+ * non-blocking and deliberately keeps queue capacity in reserve for warning
+ * notifications, so diagnostic sounds such as V2X Geiger mode cannot starve
+ * safety-warning audio.
+ */
+esp_err_t obu_expansion_buzzer_pulse(obu_warning_output_t *output,
+                                     uint32_t frequency_hz,
+                                     uint32_t duration_ms);
+
 #ifdef __cplusplus
 }
 #endif

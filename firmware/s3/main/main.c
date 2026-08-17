@@ -21,6 +21,7 @@
 #include "obu_log.h"
 #include "obu_otm.h"
 #include "obu_time.h"
+#include "obu_v2x.h"
 #include "obu_warning.h"
 
 static const char *TAG = "s3_main";
@@ -195,6 +196,34 @@ static void mark_c5_message(const obu_ipc_message_t *m)
              ipc_type_name(m->type), (unsigned)m->type, (unsigned)m->sequence, (unsigned)m->payload_len);
 }
 
+static void update_v2x_hmi_and_geiger(const uint8_t *frame, size_t frame_len)
+{
+    obu_v2x_frame_info_t info;
+    if (!obu_v2x_classify_80211_frame(frame, frame_len, &info)) return;
+
+    hmi.v2x_rx_seen = true;
+    if (info.kind == OBU_V2X_FRAME_FACILITIES) {
+        snprintf(hmi.v2x_rx_type, sizeof(hmi.v2x_rx_type), "%s",
+                 obu_v2x_message_type_name(info.message_id));
+    } else if (info.kind == OBU_V2X_FRAME_SECURED) {
+        snprintf(hmi.v2x_rx_type, sizeof(hmi.v2x_rx_type), "SECURED");
+    } else {
+        snprintf(hmi.v2x_rx_type, sizeof(hmi.v2x_rx_type), "GN");
+    }
+
+#ifdef CONFIG_OBU_GEIGER_COUNTER_ENABLE
+    if (warning_output_ready) {
+        const esp_err_t beep_err = obu_expansion_buzzer_pulse(
+            &buzzer_output,
+            CONFIG_OBU_GEIGER_COUNTER_FREQUENCY_HZ,
+            CONFIG_OBU_GEIGER_COUNTER_DURATION_MS);
+        if (beep_err != ESP_OK && beep_err != ESP_ERR_TIMEOUT) {
+            ESP_LOGW(TAG, "V2X Geiger buzzer failed: %s", esp_err_to_name(beep_err));
+        }
+    }
+#endif
+}
+
 static void ingest_ipc(const obu_ipc_message_t *m)
 {
     mark_c5_message(m);
@@ -213,6 +242,9 @@ static void ingest_ipc(const obu_ipc_message_t *m)
             ESP_LOGW(TAG, "C5 RX_FRAME too large for event bus: %u bytes", (unsigned)total);
             return;
         }
+
+        const uint8_t *frame = m->payload + sizeof(w);
+        update_v2x_hmi_and_geiger(frame, w.frame_len);
 
         c5_rx_frame_count++;
         if (c5_rx_frame_count == 1u || (c5_rx_frame_count % 100u) == 0u) {
@@ -236,10 +268,10 @@ static void ingest_ipc(const obu_ipc_message_t *m)
         e->validity_ms = 0;
         e->payload_len = (uint16_t)total;
         memcpy(e->payload, &w.meta, sizeof(w.meta));
-        memcpy(e->payload + sizeof(w.meta), m->payload + sizeof(w), w.frame_len);
+        memcpy(e->payload + sizeof(w.meta), frame, w.frame_len);
         stamp_event_utc(e);
         (void)obu_bus_publish(&bus, e);
-        if (otm) (void)obu_otm_publish_live_frame(otm, m->payload + sizeof(w), w.frame_len);
+        if (otm) (void)obu_otm_publish_live_frame(otm, frame, w.frame_len);
     } else if (m->type == OBU_IPC_RADIO_STATUS && m->payload_len >= sizeof(obu_radio_status_t)) {
         obu_radio_status_t s;
         memcpy(&s, m->payload, sizeof(s));
