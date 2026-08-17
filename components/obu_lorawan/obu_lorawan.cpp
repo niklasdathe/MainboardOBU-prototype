@@ -1,4 +1,5 @@
 #include "obu_lorawan.h"
+#include "obu_lorawan_persistence.hpp"
 
 #include <ctype.h>
 #include <new>
@@ -200,17 +201,33 @@ static bool ensure_radio(obu_lorawan_t *u)
         ESP_LOGE(TAG, "LoRaWAN OTAA configuration failed: RadioLib state=%d", (int)state);
         return false;
     }
+
+    bool restored_persistence = false;
+    bool restored_session = false;
+    const esp_err_t persistence_err = obu_lorawan_persistence_attach(
+        u->node,
+        &restored_persistence,
+        &restored_session);
+    if (persistence_err != ESP_OK) {
+        ESP_LOGE(TAG,
+                 "LoRaWAN persistence attach failed: %s; radio uplink remains disabled",
+                 esp_err_to_name(persistence_err));
+        return false;
+    }
+
     u->node->setADR(true);
     u->node->setDutyCycle(true);
 
     u->radio_ready = true;
     ESP_LOGI(TAG,
-             "Wio-SX1262 ready on shared SPI%d: SCK=%d MISO=%d MOSI=%d NSS=%d DIO1=%d RESET=%d BUSY=%d RF_SW1=%u TCXO=%.1fV",
+             "Wio-SX1262 ready on shared SPI%d: SCK=%d MISO=%d MOSI=%d NSS=%d DIO1=%d RESET=%d BUSY=%d RF_SW1=%u TCXO=%.1fV persisted_nonces=%s restored_session=%s",
              (int)u->config.host,
              u->config.sck_gpio, u->config.miso_gpio, u->config.mosi_gpio,
              u->config.nss_gpio, u->config.dio1_gpio,
              u->config.reset_gpio, u->config.busy_gpio,
-             (unsigned)SEEED_WIO_RF_SW1_GPIO, (double)SEEED_WIO_TCXO_VOLTAGE);
+             (unsigned)SEEED_WIO_RF_SW1_GPIO, (double)SEEED_WIO_TCXO_VOLTAGE,
+             restored_persistence ? "yes" : "no",
+             restored_session ? "yes" : "no");
     return true;
 }
 
@@ -246,6 +263,12 @@ static int16_t send_payload_when_allowed(obu_lorawan_t *u,
                                          uint8_t fragment_count)
 {
     for (;;) {
+        if (!obu_lorawan_persistence_healthy()) {
+            ESP_LOGE(TAG,
+                     "LoRaWAN TX blocked because durable nonce/session storage is unhealthy");
+            return RADIOLIB_ERR_UNKNOWN;
+        }
+
         RadioLibTime_t wait_ms = u->node->timeUntilUplink();
         if (wait_ms > 0) {
             ESP_LOGI(TAG,
@@ -402,6 +425,16 @@ extern "C" esp_err_t obu_lorawan_start(const obu_lorawan_config_t *config, obu_l
         return ESP_ERR_INVALID_ARG;
     }
 
+    const esp_err_t persistence_err = obu_lorawan_persistence_prepare();
+    if (persistence_err != ESP_OK) {
+        ESP_LOGE(TAG,
+                 "LoRaWAN start rejected because persistent state storage is unavailable: %s",
+                 esp_err_to_name(persistence_err));
+        delete u;
+        *out = nullptr;
+        return persistence_err;
+    }
+
     u->queue = xQueueCreate(config->queue_depth, sizeof(queued_frame_t));
     if (u->queue == nullptr) {
         delete u;
@@ -417,7 +450,7 @@ extern "C" esp_err_t obu_lorawan_start(const obu_lorawan_config_t *config, obu_l
     }
 
     ESP_LOGI(TAG,
-             "LoRaWAN uplink worker started: EU868 fport=%u max_frame=%u fragment_data=%u queue=%u",
+             "LoRaWAN uplink worker started: EU868 fport=%u max_frame=%u fragment_data=%u queue=%u persistence=NVS",
              (unsigned)config->fport,
              (unsigned)config->max_frame_bytes,
              (unsigned)config->fragment_data_bytes,
