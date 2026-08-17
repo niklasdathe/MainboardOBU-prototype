@@ -12,6 +12,7 @@
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "lwip/inet.h"
 #include "lwip/netdb.h"
 #include "lwip/sockets.h"
 #include "mqtt_client.h"
@@ -26,6 +27,7 @@ static const char *TAG = "obu_otm";
 struct obu_otm {
     bool enabled;
     bool wifi_ready;
+    bool ipv6_ready;
     bool mqtt_ready;
     bool mqtt_started;
     bool dns_main_promoted;
@@ -34,10 +36,11 @@ struct obu_otm {
     char status[96];
     char broker_uri[128];
     char broker_host[96];
-    char broker_ip[16];
-    char broker_ip_uri[64];
+    char broker_ip[INET6_ADDRSTRLEN];
+    char broker_ip_uri[128];
     char wifi_ssid[33];
     uint16_t broker_port;
+    int broker_family;
     esp_netif_t *sta_netif;
     esp_mqtt_client_handle_t mqtt;
     uint32_t attempted;
@@ -228,6 +231,15 @@ static void log_dns_server(esp_netif_t *netif, esp_netif_dns_type_t type, const 
             return;
         }
     }
+#ifdef CONFIG_LWIP_IPV6
+    if (dns.ip.type == IPADDR_TYPE_V6) {
+        char address[INET6_ADDRSTRLEN] = {0};
+        if (inet_ntop(AF_INET6, &dns.ip.u_addr.ip6, address, sizeof(address)) != NULL) {
+            ESP_LOGI(TAG, "DNS [%s] %s=%s", stage, name, address);
+            return;
+        }
+    }
+#endif
 
     ESP_LOGI(TAG, "DNS [%s] %s: configured address type=%u",
              stage, name, (unsigned)dns.ip.type);
@@ -319,20 +331,29 @@ static bool promote_dns_fallback_to_main(struct obu_otm *o)
 #endif
 }
 
-static bool configure_mqtt_resolved_ip(struct obu_otm *o, const char *ipv4)
+static bool configure_mqtt_resolved_ip(struct obu_otm *o, const char *ip, int family)
 {
-    if (o == NULL || o->mqtt == NULL || ipv4 == NULL || ipv4[0] == '\0') return false;
+    if (o == NULL || o->mqtt == NULL || ip == NULL || ip[0] == '\0') return false;
+    if (family != AF_INET && family != AF_INET6) return false;
 
     const bool secure = strncmp(o->broker_uri, "mqtts://", 8U) == 0;
-    snprintf(o->broker_ip, sizeof(o->broker_ip), "%s", ipv4);
-    const int written = snprintf(o->broker_ip_uri,
-                                 sizeof(o->broker_ip_uri),
-                                 "%s://%s:%u",
-                                 secure ? "mqtts" : "mqtt",
-                                 o->broker_ip,
-                                 (unsigned)o->broker_port);
+    snprintf(o->broker_ip, sizeof(o->broker_ip), "%s", ip);
+    const int written = family == AF_INET6
+        ? snprintf(o->broker_ip_uri,
+                   sizeof(o->broker_ip_uri),
+                   "%s://[%s]:%u",
+                   secure ? "mqtts" : "mqtt",
+                   o->broker_ip,
+                   (unsigned)o->broker_port)
+        : snprintf(o->broker_ip_uri,
+                   sizeof(o->broker_ip_uri),
+                   "%s://%s:%u",
+                   secure ? "mqtts" : "mqtt",
+                   o->broker_ip,
+                   (unsigned)o->broker_port);
     if (written <= 0 || (size_t)written >= sizeof(o->broker_ip_uri)) {
-        ESP_LOGE(TAG, "Resolved broker URI does not fit for IPv4 '%s'", ipv4);
+        ESP_LOGE(TAG, "Resolved broker URI does not fit for %s '%s'",
+                 family == AF_INET6 ? "IPv6" : "IPv4", ip);
         return false;
     }
 
@@ -343,68 +364,109 @@ static bool configure_mqtt_resolved_ip(struct obu_otm *o, const char *ipv4)
         return false;
     }
 
+    o->broker_family = family;
     ESP_LOGI(TAG,
-             "MQTT target pinned to resolved IPv4 %s:%u; TLS identity/SNI remains '%s'",
+             "MQTT target pinned to resolved %s %s:%u; TLS identity/SNI remains '%s'",
+             family == AF_INET6 ? "IPv6" : "IPv4",
              o->broker_ip,
              (unsigned)o->broker_port,
              o->broker_host);
     return true;
 }
 
+static bool resolve_broker_family(struct obu_otm *o, int family, char *resolved, size_t resolved_size)
+{
+    if (o == NULL || resolved == NULL || resolved_size == 0U) return false;
+
+    struct addrinfo hints = {0};
+    struct addrinfo *result = NULL;
+    hints.ai_family = family;
+    hints.ai_socktype = SOCK_STREAM;
+
+    const int rc = getaddrinfo(o->broker_host, NULL, &hints, &result);
+    if (rc != 0 || result == NULL) {
+        if (result != NULL) freeaddrinfo(result);
+        return false;
+    }
+
+    bool configured = false;
+    for (const struct addrinfo *it = result; it != NULL; it = it->ai_next) {
+        const void *address = NULL;
+        if (family == AF_INET && it->ai_family == AF_INET) {
+            address = &((const struct sockaddr_in *)it->ai_addr)->sin_addr;
+        } else if (family == AF_INET6 && it->ai_family == AF_INET6) {
+            address = &((const struct sockaddr_in6 *)it->ai_addr)->sin6_addr;
+        } else {
+            continue;
+        }
+
+        if (inet_ntop(family, address, resolved, resolved_size) == NULL) continue;
+        if (configure_mqtt_resolved_ip(o, resolved, family)) {
+            configured = true;
+            break;
+        }
+    }
+
+    freeaddrinfo(result);
+    return configured;
+}
+
 static bool resolve_broker_hostname(struct obu_otm *o)
 {
     if (o == NULL || o->broker_host[0] == '\0') return false;
 
-    struct addrinfo hints = {0};
-    struct addrinfo *result = NULL;
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-
     o->dns_attempts++;
-    const int rc = getaddrinfo(o->broker_host, NULL, &hints, &result);
-    if (rc != 0 || result == NULL) {
-        o->dns_failures++;
-        if (result != NULL) freeaddrinfo(result);
+
+#ifdef CONFIG_LWIP_IPV6
+    if (o->ipv6_ready) {
+        char resolved_ipv6[INET6_ADDRSTRLEN] = {0};
+        ESP_LOGI(TAG,
+                 "DNS preflight #%u: global IPv6 is available; preferring AAAA/DNS64 broker resolution",
+                 (unsigned)o->dns_attempts);
+        if (resolve_broker_family(o, AF_INET6, resolved_ipv6, sizeof(resolved_ipv6))) {
+            ESP_LOGI(TAG,
+                     "DNS preflight #%u resolved '%s' -> %s over IPv6; MQTT may start",
+                     (unsigned)o->dns_attempts, o->broker_host, resolved_ipv6);
+            return true;
+        }
         ESP_LOGW(TAG,
-                 "DNS preflight #%u failed for '%s': getaddrinfo=%d failures=%u; MQTT start deferred",
-                 (unsigned)o->dns_attempts,
-                 o->broker_host,
-                 rc,
-                 (unsigned)o->dns_failures);
-        return false;
+                 "DNS preflight #%u found no usable IPv6/DNS64 broker address; falling back to IPv4 A record",
+                 (unsigned)o->dns_attempts);
+    }
+#endif
+
+    char resolved_ipv4[INET_ADDRSTRLEN] = {0};
+    if (resolve_broker_family(o, AF_INET, resolved_ipv4, sizeof(resolved_ipv4))) {
+        ESP_LOGI(TAG,
+                 "DNS preflight #%u resolved '%s' -> %s over IPv4; MQTT may start",
+                 (unsigned)o->dns_attempts, o->broker_host, resolved_ipv4);
+        return true;
     }
 
-    char resolved_ipv4[16] = {0};
-    const struct sockaddr_in *addr = (const struct sockaddr_in *)result->ai_addr;
-    const char *ntop = inet_ntop(AF_INET, &addr->sin_addr, resolved_ipv4, sizeof(resolved_ipv4));
-    if (ntop == NULL || !configure_mqtt_resolved_ip(o, resolved_ipv4)) {
-        freeaddrinfo(result);
-        o->dns_failures++;
-        ESP_LOGW(TAG, "DNS preflight #%u resolved '%s' but could not configure MQTT target",
-                 (unsigned)o->dns_attempts, o->broker_host);
-        return false;
-    }
-
-    ESP_LOGI(TAG, "DNS preflight #%u resolved '%s' -> %s; MQTT may start",
-             (unsigned)o->dns_attempts, o->broker_host, resolved_ipv4);
-    freeaddrinfo(result);
-    return true;
+    o->dns_failures++;
+    ESP_LOGW(TAG,
+             "DNS preflight #%u failed for '%s': no usable IPv4%s address failures=%u; MQTT start deferred",
+             (unsigned)o->dns_attempts,
+             o->broker_host,
+             o->ipv6_ready ? " or IPv6/DNS64" : "",
+             (unsigned)o->dns_failures);
+    return false;
 }
 
 static bool resolve_broker_doh(struct obu_otm *o)
 {
     if (o == NULL) return false;
 
-    char resolved_ipv4[16] = {0};
+    char resolved_ipv4[INET_ADDRSTRLEN] = {0};
     o->doh_attempts++;
     ESP_LOGW(TAG,
-             "Classic DNS attempts failed; starting DoH fallback #%u for '%s' over HTTPS/443",
+             "Classic DNS attempts failed; starting multi-transport DNS recovery #%u for '%s'",
              (unsigned)o->doh_attempts,
              o->broker_host);
     const esp_err_t err = obu_doh_resolve_ipv4(o->broker_host, resolved_ipv4, sizeof(resolved_ipv4));
     if (err != ESP_OK) {
         o->doh_failures++;
-        ESP_LOGW(TAG, "DoH fallback #%u failed for '%s': %s failures=%u",
+        ESP_LOGW(TAG, "DNS recovery #%u failed for '%s': %s failures=%u",
                  (unsigned)o->doh_attempts,
                  o->broker_host,
                  esp_err_to_name(err),
@@ -412,12 +474,12 @@ static bool resolve_broker_doh(struct obu_otm *o)
         return false;
     }
 
-    if (!configure_mqtt_resolved_ip(o, resolved_ipv4)) {
+    if (!configure_mqtt_resolved_ip(o, resolved_ipv4, AF_INET)) {
         o->doh_failures++;
         return false;
     }
 
-    ESP_LOGI(TAG, "DoH fallback #%u resolved broker '%s' -> %s",
+    ESP_LOGI(TAG, "DNS recovery #%u resolved broker '%s' -> %s",
              (unsigned)o->doh_attempts, o->broker_host, resolved_ipv4);
     return true;
 }
@@ -450,9 +512,11 @@ static void log_mqtt_error(esp_mqtt_event_handle_t event, struct obu_otm *o)
                  (unsigned)o->mqtt_errors, (unsigned)err->error_type);
     }
     ESP_LOGI(TAG,
-             "MQTT diagnostic context: broker=%s resolved_ip=%s wifi_ready=%s mqtt_started=%s dns_attempts=%u dns_failures=%u doh_attempts=%u doh_failures=%u attempts=%u connects=%u wifi_disconnects=%u network_restarts=%u",
+             "MQTT diagnostic context: broker=%s resolved_ip=%s family=%s ipv6_ready=%s wifi_ready=%s mqtt_started=%s dns_attempts=%u dns_failures=%u recovery_attempts=%u recovery_failures=%u attempts=%u connects=%u wifi_disconnects=%u network_restarts=%u",
              o->broker_uri,
              o->broker_ip[0] != '\0' ? o->broker_ip : "unresolved",
+             o->broker_family == AF_INET6 ? "IPv6" : (o->broker_family == AF_INET ? "IPv4" : "none"),
+             o->ipv6_ready ? "yes" : "no",
              o->wifi_ready ? "yes" : "no",
              o->mqtt_started ? "yes" : "no",
              (unsigned)o->dns_attempts,
@@ -476,9 +540,10 @@ static void mqtt_evt(void *arg, esp_event_base_t base, int32_t id, void *data)
 
     if (id == MQTT_EVENT_BEFORE_CONNECT) {
         o->mqtt_attempts++;
-        ESP_LOGI(TAG, "OpenTrafficMap MQTT attempting connection #%u to %s (identity=%s)",
+        ESP_LOGI(TAG, "OpenTrafficMap MQTT attempting connection #%u to %s (family=%s identity=%s)",
                  (unsigned)o->mqtt_attempts,
                  o->broker_ip_uri[0] != '\0' ? o->broker_ip_uri : o->broker_uri,
+                 o->broker_family == AF_INET6 ? "IPv6" : (o->broker_family == AF_INET ? "IPv4" : "DNS"),
                  o->broker_host);
     } else if (id == MQTT_EVENT_CONNECTED) {
         o->mqtt_ready = true;
@@ -508,10 +573,6 @@ static void stop_mqtt_for_network_loss(struct obu_otm *o)
 {
     if (o == NULL || o->mqtt == NULL || !o->mqtt_started) return;
 
-    /* This function is called from the Wi-Fi event handler, not from an MQTT
-     * callback. Stop the MQTT task/socket explicitly so the next DHCP lease
-     * starts from a fresh TCP/TLS state, matching the OpenTrafficMap receiver
-     * lifecycle of MQTT-up on GOT_IP and MQTT-down on network loss. */
     ESP_LOGI(TAG, "Stopping OpenTrafficMap MQTT because Wi-Fi/IP is unavailable");
     const esp_err_t err = esp_mqtt_client_stop(o->mqtt);
     if (err == ESP_OK) {
@@ -527,7 +588,7 @@ static void start_mqtt_after_ip(struct obu_otm *o)
 {
     if (o == NULL || o->mqtt == NULL || o->mqtt_started || !o->wifi_ready) return;
     if (o->broker_ip[0] == '\0') {
-        ESP_LOGW(TAG, "Refusing to start MQTT before broker IPv4 resolution is complete");
+        ESP_LOGW(TAG, "Refusing to start MQTT before broker IP resolution is complete");
         return;
     }
 
@@ -573,7 +634,7 @@ static void dns_gate_task(void *arg)
 
         if (!o->wifi_ready) break;
         ESP_LOGW(TAG,
-                 "Broker unresolved by classic DNS and DoH; retrying resolver chain in %u ms while Wi-Fi remains available",
+                 "Broker unresolved by resolver recovery chain; retrying in %u ms while Wi-Fi remains available",
                  (unsigned)OBU_DNS_RETRY_DELAY_MS);
         vTaskDelay(pdMS_TO_TICKS(OBU_DNS_RETRY_DELAY_MS));
     }
@@ -596,7 +657,7 @@ static void start_dns_gate_after_ip(struct obu_otm *o)
     if (created != pdPASS) {
         o->dns_task_running = false;
         o->errors++;
-        ESP_LOGE(TAG, "Failed to create DNS/DoH resolver task; MQTT remains deferred");
+        ESP_LOGE(TAG, "Failed to create DNS resolver task; MQTT remains deferred");
     }
 }
 
@@ -621,11 +682,20 @@ static void wifi_evt(void *arg, esp_event_base_t base, int32_t id, void *data)
         ESP_LOGI(TAG, "Wi-Fi associated with SSID '%s'; waiting for DHCP/IP", o->wifi_ssid);
         log_wifi_link();
         log_wifi_config("STA_CONNECTED");
+#ifdef CONFIG_LWIP_IPV6
+        const esp_err_t ip6_err = esp_netif_create_ip6_linklocal(o->sta_netif);
+        if (ip6_err != ESP_OK && ip6_err != ESP_ERR_ESP_NETIF_IF_NOT_READY) {
+            ESP_LOGW(TAG, "Unable to start IPv6 link-local/SLAAC on Wi-Fi association: %s",
+                     esp_err_to_name(ip6_err));
+        }
+#endif
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         o->wifi_ready = false;
+        o->ipv6_ready = false;
         o->dns_main_promoted = false;
         o->broker_ip[0] = '\0';
         o->broker_ip_uri[0] = '\0';
+        o->broker_family = AF_UNSPEC;
         o->wifi_disconnects++;
         stop_mqtt_for_network_loss(o);
 
@@ -638,13 +708,6 @@ static void wifi_evt(void *arg, esp_event_base_t base, int32_t id, void *data)
                      wifi_disconnect_reason_name(disc->reason),
                      (int)disc->rssi,
                      disc->bssid[0], disc->bssid[1], disc->bssid[2], disc->bssid[3], disc->bssid[4], disc->bssid[5]);
-            if (disc->reason == WIFI_REASON_NO_AP_FOUND) {
-                ESP_LOGW(TAG,
-                         "Wi-Fi debug: configured SSID was not found; verify SSID spelling, hotspot visibility, supported band/channel and that the hotspot is actively advertising");
-            } else if (disc->reason == WIFI_REASON_AUTH_FAIL || disc->reason == WIFI_REASON_HANDSHAKE_TIMEOUT) {
-                ESP_LOGW(TAG,
-                         "Wi-Fi debug: authentication/handshake failed; verify the configured password and hotspot security mode");
-            }
         } else if (disc != NULL) {
             ESP_LOGW(TAG, "Wi-Fi disconnected #%u: reason=%u RSSI=%d; reconnecting",
                      (unsigned)o->wifi_disconnects, (unsigned)disc->reason, (int)disc->rssi);
@@ -659,22 +722,44 @@ static void wifi_evt(void *arg, esp_event_base_t base, int32_t id, void *data)
         o->dns_main_promoted = false;
         o->broker_ip[0] = '\0';
         o->broker_ip_uri[0] = '\0';
+        o->broker_family = AF_UNSPEC;
         const ip_event_got_ip_t *got = (const ip_event_got_ip_t *)data;
         if (got != NULL) {
-            ESP_LOGI(TAG, "Wi-Fi acquired IP: " IPSTR " netmask=" IPSTR " gateway=" IPSTR " changed=%s",
+            ESP_LOGI(TAG, "Wi-Fi acquired IPv4: " IPSTR " netmask=" IPSTR " gateway=" IPSTR " changed=%s",
                      IP2STR(&got->ip_info.ip),
                      IP2STR(&got->ip_info.netmask),
                      IP2STR(&got->ip_info.gw),
                      got->ip_changed ? "yes" : "no");
         } else {
-            ESP_LOGI(TAG, "Wi-Fi acquired IP address");
+            ESP_LOGI(TAG, "Wi-Fi acquired IPv4 address");
         }
         log_wifi_link();
         log_wifi_config("GOT_IP");
         start_dns_gate_after_ip(o);
+#ifdef CONFIG_LWIP_IPV6
+    } else if (base == IP_EVENT && id == IP_EVENT_GOT_IP6) {
+        esp_ip6_addr_t global = {0};
+        if (esp_netif_get_ip6_global(o->sta_netif, &global) == ESP_OK) {
+            if (!o->ipv6_ready) {
+                ESP_LOGI(TAG, "Wi-Fi acquired usable global IPv6: " IPV6STR,
+                         IPV62STR(global));
+            }
+            o->ipv6_ready = true;
+            log_dns_config(o->sta_netif, "IPV6_READY");
+            if (o->wifi_ready && !o->mqtt_started && !o->dns_task_running) {
+                start_dns_gate_after_ip(o);
+            }
+        } else if (wifi_debug_enabled()) {
+            const ip_event_got_ip6_t *got6 = (const ip_event_got_ip6_t *)data;
+            if (got6 != NULL) {
+                ESP_LOGD(TAG, "IPv6 event received but no preferred global IPv6 yet: " IPV6STR,
+                         IPV62STR(got6->ip6_info.ip));
+            }
+        }
+#endif
     } else if (base == IP_EVENT && id == IP_EVENT_STA_LOST_IP && wifi_debug_enabled()) {
         ESP_LOGW(TAG,
-                 "Wi-Fi debug: station lost its IP lease; Wi-Fi association may still be present, watch for a new GOT_IP event or a subsequent disconnect");
+                 "Wi-Fi debug: station lost its IPv4 lease; IPv6 may still remain available until Wi-Fi disconnect");
     }
 }
 
@@ -685,6 +770,7 @@ esp_err_t obu_otm_wifi_start(const obu_otm_wifi_config_t *c, obu_otm_t **out)
     struct obu_otm *o = calloc(1, sizeof(*o));
     if (o == NULL) return ESP_ERR_NO_MEM;
     o->enabled = c->enabled;
+    o->broker_family = AF_UNSPEC;
 
     if (!c->enabled) {
         ESP_LOGI(TAG, "Direct OpenTrafficMap Wi-Fi uploader disabled");
@@ -733,7 +819,10 @@ esp_err_t obu_otm_wifi_start(const obu_otm_wifi_config_t *c, obu_otm_t **out)
 #else
     ESP_LOGI(TAG, "OTM DNS fallback disabled; DHCP-provided DNS only");
 #endif
-    ESP_LOGI(TAG, "OTM secure DoH fallback enabled over HTTPS/443 using Cloudflare wire-format DNS");
+#ifdef CONFIG_LWIP_IPV6_AUTOCONFIG
+    ESP_LOGI(TAG, "OTM IPv6 hotspot recovery enabled: SLAAC/RDNSS plus AAAA/DNS64 broker preference");
+#endif
+    ESP_LOGI(TAG, "OTM multi-transport DNS recovery enabled: RDNSS, DNS-over-TCP, Cloudflare DoH and Google DoH");
 
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
