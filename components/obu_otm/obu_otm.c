@@ -1,4 +1,5 @@
 #include "obu_otm.h"
+#include "obu_doh.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,7 +34,10 @@ struct obu_otm {
     char status[96];
     char broker_uri[128];
     char broker_host[96];
+    char broker_ip[16];
+    char broker_ip_uri[64];
     char wifi_ssid[33];
+    uint16_t broker_port;
     esp_netif_t *sta_netif;
     esp_mqtt_client_handle_t mqtt;
     uint32_t attempted;
@@ -45,6 +49,8 @@ struct obu_otm {
     uint32_t dns_attempts;
     uint32_t dns_failures;
     uint32_t dns_promotions;
+    uint32_t doh_attempts;
+    uint32_t doh_failures;
     uint32_t mqtt_attempts;
     uint32_t mqtt_connects;
     uint32_t mqtt_errors;
@@ -104,6 +110,44 @@ static bool broker_hostname_from_uri(const char *uri, char *host, size_t host_si
     memcpy(host, host_start, len);
     host[len] = '\0';
     return true;
+}
+
+static uint16_t broker_port_from_uri(const char *uri)
+{
+    if (uri == NULL) return 0U;
+    const bool secure = strncmp(uri, "mqtts://", 8U) == 0;
+    const uint16_t default_port = secure ? 8883U : 1883U;
+
+    const char *authority = strstr(uri, "://");
+    authority = authority != NULL ? authority + 3 : uri;
+    const char *authority_end = strchr(authority, '/');
+    if (authority_end == NULL) authority_end = authority + strlen(authority);
+
+    const char *host_start = authority;
+    for (const char *p = authority; p < authority_end; ++p) {
+        if (*p == '@') host_start = p + 1;
+    }
+    if (host_start >= authority_end) return default_port;
+
+    const char *port_start = NULL;
+    if (*host_start == '[') {
+        const char *closing = memchr(host_start, ']', (size_t)(authority_end - host_start));
+        if (closing != NULL && closing + 1 < authority_end && closing[1] == ':') port_start = closing + 2;
+    } else {
+        const char *colon = memchr(host_start, ':', (size_t)(authority_end - host_start));
+        if (colon != NULL) port_start = colon + 1;
+    }
+
+    if (port_start == NULL || port_start >= authority_end) return default_port;
+    char port_text[6] = {0};
+    const size_t port_len = (size_t)(authority_end - port_start);
+    if (port_len == 0U || port_len >= sizeof(port_text)) return default_port;
+    memcpy(port_text, port_start, port_len);
+
+    char *end = NULL;
+    const unsigned long parsed = strtoul(port_text, &end, 10);
+    if (end == port_text || *end != '\0' || parsed == 0UL || parsed > 65535UL) return default_port;
+    return (uint16_t)parsed;
 }
 
 static void enable_wifi_debug_logging(void)
@@ -275,6 +319,38 @@ static bool promote_dns_fallback_to_main(struct obu_otm *o)
 #endif
 }
 
+static bool configure_mqtt_resolved_ip(struct obu_otm *o, const char *ipv4)
+{
+    if (o == NULL || o->mqtt == NULL || ipv4 == NULL || ipv4[0] == '\0') return false;
+
+    const bool secure = strncmp(o->broker_uri, "mqtts://", 8U) == 0;
+    snprintf(o->broker_ip, sizeof(o->broker_ip), "%s", ipv4);
+    const int written = snprintf(o->broker_ip_uri,
+                                 sizeof(o->broker_ip_uri),
+                                 "%s://%s:%u",
+                                 secure ? "mqtts" : "mqtt",
+                                 o->broker_ip,
+                                 (unsigned)o->broker_port);
+    if (written <= 0 || (size_t)written >= sizeof(o->broker_ip_uri)) {
+        ESP_LOGE(TAG, "Resolved broker URI does not fit for IPv4 '%s'", ipv4);
+        return false;
+    }
+
+    const esp_err_t err = esp_mqtt_client_set_uri(o->mqtt, o->broker_ip_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Unable to configure MQTT resolved-IP target %s: %s",
+                 o->broker_ip_uri, esp_err_to_name(err));
+        return false;
+    }
+
+    ESP_LOGI(TAG,
+             "MQTT target pinned to resolved IPv4 %s:%u; TLS identity/SNI remains '%s'",
+             o->broker_ip,
+             (unsigned)o->broker_port,
+             o->broker_host);
+    return true;
+}
+
 static bool resolve_broker_hostname(struct obu_otm *o)
 {
     if (o == NULL || o->broker_host[0] == '\0') return false;
@@ -298,9 +374,51 @@ static bool resolve_broker_hostname(struct obu_otm *o)
         return false;
     }
 
-    ESP_LOGI(TAG, "DNS preflight #%u resolved '%s' (family=%d); MQTT may start",
-             (unsigned)o->dns_attempts, o->broker_host, result->ai_family);
+    char resolved_ipv4[16] = {0};
+    const struct sockaddr_in *addr = (const struct sockaddr_in *)result->ai_addr;
+    const char *ntop = inet_ntop(AF_INET, &addr->sin_addr, resolved_ipv4, sizeof(resolved_ipv4));
+    if (ntop == NULL || !configure_mqtt_resolved_ip(o, resolved_ipv4)) {
+        freeaddrinfo(result);
+        o->dns_failures++;
+        ESP_LOGW(TAG, "DNS preflight #%u resolved '%s' but could not configure MQTT target",
+                 (unsigned)o->dns_attempts, o->broker_host);
+        return false;
+    }
+
+    ESP_LOGI(TAG, "DNS preflight #%u resolved '%s' -> %s; MQTT may start",
+             (unsigned)o->dns_attempts, o->broker_host, resolved_ipv4);
     freeaddrinfo(result);
+    return true;
+}
+
+static bool resolve_broker_doh(struct obu_otm *o)
+{
+    if (o == NULL) return false;
+
+    char resolved_ipv4[16] = {0};
+    o->doh_attempts++;
+    ESP_LOGW(TAG,
+             "Classic DNS attempts failed; starting DoH fallback #%u for '%s' over HTTPS/443",
+             (unsigned)o->doh_attempts,
+             o->broker_host);
+    const esp_err_t err = obu_doh_resolve_ipv4(o->broker_host, resolved_ipv4, sizeof(resolved_ipv4));
+    if (err != ESP_OK) {
+        o->doh_failures++;
+        ESP_LOGW(TAG, "DoH fallback #%u failed for '%s': %s failures=%u",
+                 (unsigned)o->doh_attempts,
+                 o->broker_host,
+                 esp_err_to_name(err),
+                 (unsigned)o->doh_failures);
+        return false;
+    }
+
+    if (!configure_mqtt_resolved_ip(o, resolved_ipv4)) {
+        o->doh_failures++;
+        return false;
+    }
+
+    ESP_LOGI(TAG, "DoH fallback #%u resolved broker '%s' -> %s",
+             (unsigned)o->doh_attempts, o->broker_host, resolved_ipv4);
     return true;
 }
 
@@ -332,12 +450,15 @@ static void log_mqtt_error(esp_mqtt_event_handle_t event, struct obu_otm *o)
                  (unsigned)o->mqtt_errors, (unsigned)err->error_type);
     }
     ESP_LOGI(TAG,
-             "MQTT diagnostic context: broker=%s wifi_ready=%s mqtt_started=%s dns_attempts=%u dns_failures=%u attempts=%u connects=%u wifi_disconnects=%u network_restarts=%u",
+             "MQTT diagnostic context: broker=%s resolved_ip=%s wifi_ready=%s mqtt_started=%s dns_attempts=%u dns_failures=%u doh_attempts=%u doh_failures=%u attempts=%u connects=%u wifi_disconnects=%u network_restarts=%u",
              o->broker_uri,
+             o->broker_ip[0] != '\0' ? o->broker_ip : "unresolved",
              o->wifi_ready ? "yes" : "no",
              o->mqtt_started ? "yes" : "no",
              (unsigned)o->dns_attempts,
              (unsigned)o->dns_failures,
+             (unsigned)o->doh_attempts,
+             (unsigned)o->doh_failures,
              (unsigned)o->mqtt_attempts,
              (unsigned)o->mqtt_connects,
              (unsigned)o->wifi_disconnects,
@@ -355,8 +476,10 @@ static void mqtt_evt(void *arg, esp_event_base_t base, int32_t id, void *data)
 
     if (id == MQTT_EVENT_BEFORE_CONNECT) {
         o->mqtt_attempts++;
-        ESP_LOGI(TAG, "OpenTrafficMap MQTT attempting connection #%u to %s",
-                 (unsigned)o->mqtt_attempts, o->broker_uri);
+        ESP_LOGI(TAG, "OpenTrafficMap MQTT attempting connection #%u to %s (identity=%s)",
+                 (unsigned)o->mqtt_attempts,
+                 o->broker_ip_uri[0] != '\0' ? o->broker_ip_uri : o->broker_uri,
+                 o->broker_host);
     } else if (id == MQTT_EVENT_CONNECTED) {
         o->mqtt_ready = true;
         o->mqtt_connects++;
@@ -403,8 +526,13 @@ static void stop_mqtt_for_network_loss(struct obu_otm *o)
 static void start_mqtt_after_ip(struct obu_otm *o)
 {
     if (o == NULL || o->mqtt == NULL || o->mqtt_started || !o->wifi_ready) return;
+    if (o->broker_ip[0] == '\0') {
+        ESP_LOGW(TAG, "Refusing to start MQTT before broker IPv4 resolution is complete");
+        return;
+    }
 
-    ESP_LOGI(TAG, "DNS is ready; starting OpenTrafficMap MQTT client for %s", o->broker_uri);
+    ESP_LOGI(TAG, "DNS is ready; starting OpenTrafficMap MQTT client for %s via %s",
+             o->broker_uri, o->broker_ip_uri);
     const esp_err_t err = esp_mqtt_client_start(o->mqtt);
     if (err == ESP_OK) {
         o->mqtt_started = true;
@@ -438,7 +566,14 @@ static void dns_gate_task(void *arg)
             continue;
         }
 
-        ESP_LOGW(TAG, "Broker DNS unresolved; retrying preflight in %u ms while Wi-Fi remains available",
+        if (resolve_broker_doh(o)) {
+            if (o->wifi_ready) start_mqtt_after_ip(o);
+            break;
+        }
+
+        if (!o->wifi_ready) break;
+        ESP_LOGW(TAG,
+                 "Broker unresolved by classic DNS and DoH; retrying resolver chain in %u ms while Wi-Fi remains available",
                  (unsigned)OBU_DNS_RETRY_DELAY_MS);
         vTaskDelay(pdMS_TO_TICKS(OBU_DNS_RETRY_DELAY_MS));
     }
@@ -461,8 +596,7 @@ static void start_dns_gate_after_ip(struct obu_otm *o)
     if (created != pdPASS) {
         o->dns_task_running = false;
         o->errors++;
-        ESP_LOGE(TAG, "Failed to create DNS preflight task; starting MQTT without preflight");
-        start_mqtt_after_ip(o);
+        ESP_LOGE(TAG, "Failed to create DNS/DoH resolver task; MQTT remains deferred");
     }
 }
 
@@ -490,6 +624,8 @@ static void wifi_evt(void *arg, esp_event_base_t base, int32_t id, void *data)
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         o->wifi_ready = false;
         o->dns_main_promoted = false;
+        o->broker_ip[0] = '\0';
+        o->broker_ip_uri[0] = '\0';
         o->wifi_disconnects++;
         stop_mqtt_for_network_loss(o);
 
@@ -521,6 +657,8 @@ static void wifi_evt(void *arg, esp_event_base_t base, int32_t id, void *data)
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         o->wifi_ready = true;
         o->dns_main_promoted = false;
+        o->broker_ip[0] = '\0';
+        o->broker_ip_uri[0] = '\0';
         const ip_event_got_ip_t *got = (const ip_event_got_ip_t *)data;
         if (got != NULL) {
             ESP_LOGI(TAG, "Wi-Fi acquired IP: " IPSTR " netmask=" IPSTR " gateway=" IPSTR " changed=%s",
@@ -572,9 +710,21 @@ esp_err_t obu_otm_wifi_start(const obu_otm_wifi_config_t *c, obu_otm_t **out)
         free(o);
         return ESP_ERR_INVALID_ARG;
     }
+    o->broker_port = broker_port_from_uri(o->broker_uri);
+    if (o->broker_port == 0U) {
+        ESP_LOGE(TAG, "Unable to determine broker port from URI '%s'", o->broker_uri);
+        free(o);
+        return ESP_ERR_INVALID_ARG;
+    }
 
-    ESP_LOGI(TAG, "OTM direct uploader config: SSID='%s' broker='%s' broker_host='%s' node='%s' packet_topic='%s'",
-             o->wifi_ssid, o->broker_uri, o->broker_host, c->node_id, o->topic);
+    ESP_LOGI(TAG,
+             "OTM direct uploader config: SSID='%s' broker='%s' broker_host='%s' broker_port=%u node='%s' packet_topic='%s'",
+             o->wifi_ssid,
+             o->broker_uri,
+             o->broker_host,
+             (unsigned)o->broker_port,
+             c->node_id,
+             o->topic);
 #ifdef CONFIG_OBU_OTM_TLS_TRACE
     ESP_LOGW(TAG, "OpenTrafficMap TLS trace enabled; mbedTLS handshake diagnostics are active for development");
 #endif
@@ -583,6 +733,7 @@ esp_err_t obu_otm_wifi_start(const obu_otm_wifi_config_t *c, obu_otm_t **out)
 #else
     ESP_LOGI(TAG, "OTM DNS fallback disabled; DHCP-provided DNS only");
 #endif
+    ESP_LOGI(TAG, "OTM secure DoH fallback enabled over HTTPS/443 using Cloudflare wire-format DNS");
 
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -647,6 +798,7 @@ esp_err_t obu_otm_wifi_start(const obu_otm_wifi_config_t *c, obu_otm_t **out)
     esp_mqtt_client_config_t mc = {
         .broker.address.uri = o->broker_uri,
         .broker.verification.crt_bundle_attach = esp_crt_bundle_attach,
+        .broker.verification.common_name = o->broker_host,
         .session.last_will.topic = o->status,
         .session.last_will.msg = "offline",
         .session.last_will.retain = 1,
