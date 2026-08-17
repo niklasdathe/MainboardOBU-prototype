@@ -3,12 +3,12 @@ menu "BicycleOBU prototype"
 config OBU_GNSS_PPS_GPIO
     int "GNSS PPS GPIO"
     range 0 48
-    default 47 if OBU_LORAWAN_ENABLE
-    default 41
+    default 47
     help
-        GPIO carrying the L76K PPS pulse. The Wio-SX1262 B2B connector uses
-        GPIO41 as SX1262 NSS, so LoRaWAN builds relocate PPS to GPIO47. Rewire
-        the L76K PPS carrier accordingly when OBU_LORAWAN_ENABLE is selected.
+        GPIO carrying the L76K PPS pulse. The Wio-SX1262 B2B connector owns
+        GPIO41 as SX1262 NSS on the LoRaWAN prototype, so the L76K PPS carrier
+        must be rewired to GPIO47. Override only for a hardware profile without
+        the Wio-SX1262 attached.
 
 config OBU_BUZZER_ENABLE
     bool "Enable Expansion Base local warning buzzer"
