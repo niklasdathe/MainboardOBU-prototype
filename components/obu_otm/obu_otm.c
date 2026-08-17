@@ -23,6 +23,7 @@ static const char *TAG = "obu_otm";
 #define OBU_DNS_RETRY_DELAY_MS 3000U
 #define OBU_DNS_TASK_STACK_SIZE 4096U
 #define OBU_DNS_TASK_PRIORITY 5U
+#define OBU_IPV6_PREFERENCE_GRACE_MS 3500U
 
 struct obu_otm {
     bool enabled;
@@ -437,6 +438,29 @@ static bool resolve_broker_hostname(struct obu_otm *o)
 
     char resolved_ipv4[INET_ADDRSTRLEN] = {0};
     if (resolve_broker_family(o, AF_INET, resolved_ipv4, sizeof(resolved_ipv4))) {
+#ifdef CONFIG_LWIP_IPV6
+        if (o->ipv6_ready) {
+            char resolved_ipv6[INET6_ADDRSTRLEN] = {0};
+            ESP_LOGW(TAG,
+                     "DNS preflight #%u: IPv6 became usable while IPv4 lookup was in progress; retrying AAAA/DNS64 before accepting IPv4 %s",
+                     (unsigned)o->dns_attempts,
+                     resolved_ipv4);
+            if (resolve_broker_family(o, AF_INET6, resolved_ipv6, sizeof(resolved_ipv6))) {
+                ESP_LOGI(TAG,
+                         "DNS preflight #%u resolved '%s' -> %s over IPv6 after late SLAAC; MQTT may start",
+                         (unsigned)o->dns_attempts, o->broker_host, resolved_ipv6);
+                return true;
+            }
+            ESP_LOGW(TAG,
+                     "DNS preflight #%u: late IPv6 is available but no usable AAAA/DNS64 broker address was returned; keeping IPv4 %s",
+                     (unsigned)o->dns_attempts,
+                     resolved_ipv4);
+            if (!configure_mqtt_resolved_ip(o, resolved_ipv4, AF_INET)) {
+                o->dns_failures++;
+                return false;
+            }
+        }
+#endif
         ESP_LOGI(TAG,
                  "DNS preflight #%u resolved '%s' -> %s over IPv4; MQTT may start",
                  (unsigned)o->dns_attempts, o->broker_host, resolved_ipv4);
@@ -614,6 +638,15 @@ static void dns_gate_task(void *arg)
     log_dns_config(o->sta_netif, "DHCP");
     configure_dns_fallback(o->sta_netif);
     log_dns_config(o->sta_netif, "EFFECTIVE");
+
+#ifdef CONFIG_LWIP_IPV6_AUTOCONFIG
+    if (!o->ipv6_ready && o->wifi_ready) {
+        ESP_LOGI(TAG,
+                 "Waiting %u ms for IPv6 SLAAC/RDNSS before selecting the broker transport",
+                 (unsigned)OBU_IPV6_PREFERENCE_GRACE_MS);
+        vTaskDelay(pdMS_TO_TICKS(OBU_IPV6_PREFERENCE_GRACE_MS));
+    }
+#endif
 
     while (o->wifi_ready && !o->mqtt_started) {
         if (resolve_broker_hostname(o)) {
