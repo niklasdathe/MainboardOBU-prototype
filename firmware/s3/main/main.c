@@ -19,6 +19,7 @@
 #include "obu_ifaces.h"
 #include "obu_ipc.h"
 #include "obu_log.h"
+#include "obu_lorawan.h"
 #include "obu_time.h"
 #include "obu_v2x.h"
 #include "obu_warning.h"
@@ -29,6 +30,7 @@ static obu_ipc_endpoint_t *ipc;
 static obu_display_driver_t display;
 static obu_time_service_t timesvc;
 static obu_diag_logger_t *logger;
+static obu_lorawan_t *lorawan;
 static obu_hmi_model_t hmi;
 static obu_warning_output_t buzzer_output;
 static obu_warning_controller_t warning_controller;
@@ -235,13 +237,23 @@ static void ingest_ipc(const obu_ipc_message_t *m)
             return;
         }
 
+        const uint8_t *frame = m->payload + sizeof(w);
+#ifdef CONFIG_OBU_LORAWAN_ENABLE
+        if (lorawan != NULL) {
+            const esp_err_t uplink_err = obu_lorawan_enqueue_frame(lorawan, frame, w.frame_len);
+            if (uplink_err != ESP_OK && uplink_err != ESP_ERR_TIMEOUT &&
+                uplink_err != ESP_ERR_INVALID_SIZE && uplink_err != ESP_ERR_NOT_SUPPORTED) {
+                ESP_LOGD(TAG, "LoRaWAN enqueue failed: %s", esp_err_to_name(uplink_err));
+            }
+        }
+#endif
+
         size_t total = sizeof(w.meta) + w.frame_len;
         if (total > OBU_EVENT_PAYLOAD_MAX) {
             ESP_LOGW(TAG, "C5 RX_FRAME too large for event bus: %u bytes", (unsigned)total);
             return;
         }
 
-        const uint8_t *frame = m->payload + sizeof(w);
         update_v2x_hmi_and_geiger(frame, w.frame_len);
 
         c5_rx_frame_count++;
@@ -487,10 +499,11 @@ static void pps_task(void *arg)
 
 static esp_err_t start_pps(void)
 {
+    const gpio_num_t pps_gpio = (gpio_num_t)CONFIG_OBU_GNSS_PPS_GPIO;
     pps_queue = xQueueCreate(4, sizeof(uint64_t));
     if (!pps_queue) return ESP_ERR_NO_MEM;
     gpio_config_t gc = {
-        .pin_bit_mask = 1ULL << GPIO_NUM_41,
+        .pin_bit_mask = 1ULL << pps_gpio,
         .mode = GPIO_MODE_INPUT,
         .pull_down_en = GPIO_PULLDOWN_ENABLE,
         .intr_type = GPIO_INTR_POSEDGE,
@@ -498,8 +511,9 @@ static esp_err_t start_pps(void)
     ESP_RETURN_ON_ERROR(gpio_config(&gc), TAG, "PPS gpio");
     esp_err_t e = gpio_install_isr_service(0);
     if (e != ESP_OK && e != ESP_ERR_INVALID_STATE) return e;
-    ESP_RETURN_ON_ERROR(gpio_isr_handler_add(GPIO_NUM_41, pps_isr, NULL), TAG, "PPS isr");
+    ESP_RETURN_ON_ERROR(gpio_isr_handler_add(pps_gpio, pps_isr, NULL), TAG, "PPS isr");
     if (xTaskCreate(pps_task, "gnss_pps", 3072, NULL, 11, NULL) != pdPASS) return ESP_ERR_NO_MEM;
+    ESP_LOGI(TAG, "GNSS PPS input: GPIO%d", (int)pps_gpio);
     return ESP_OK;
 }
 
@@ -612,6 +626,36 @@ void app_main(void)
         .bus_already_initialized = true,
     };
     if (obu_diag_logger_start(&lc, &logger) != ESP_OK) ESP_LOGW(TAG, "SD diagnostic log unavailable");
+
+#ifdef CONFIG_OBU_LORAWAN_ENABLE
+    const obu_lorawan_config_t lorawan_config = {
+        .enabled = true,
+        .host = SPI2_HOST,
+        .sck_gpio = 7,
+        .miso_gpio = 8,
+        .mosi_gpio = 9,
+        .nss_gpio = 41,
+        .dio1_gpio = 39,
+        .reset_gpio = 42,
+        .busy_gpio = 40,
+        .spi_clock_hz = 2000000,
+        .join_eui_hex = CONFIG_OBU_LORAWAN_JOIN_EUI,
+        .dev_eui_hex = CONFIG_OBU_LORAWAN_DEV_EUI,
+        .nwk_key_hex = CONFIG_OBU_LORAWAN_NWK_KEY,
+        .app_key_hex = CONFIG_OBU_LORAWAN_APP_KEY,
+        .fport = CONFIG_OBU_LORAWAN_FPORT,
+        .max_frame_bytes = CONFIG_OBU_LORAWAN_MAX_FRAME_BYTES,
+        .fragment_data_bytes = CONFIG_OBU_LORAWAN_FRAGMENT_DATA_BYTES,
+        .queue_depth = CONFIG_OBU_LORAWAN_QUEUE_DEPTH,
+        .min_fragment_interval_ms = CONFIG_OBU_LORAWAN_MIN_FRAGMENT_INTERVAL_MS,
+        .join_retry_ms = CONFIG_OBU_LORAWAN_JOIN_RETRY_MS,
+    };
+    const esp_err_t lorawan_err = obu_lorawan_start(&lorawan_config, &lorawan);
+    if (lorawan_err != ESP_OK) {
+        ESP_LOGW(TAG, "Wio-SX1262 LoRaWAN uplink unavailable; acquisition continues: %s",
+                 esp_err_to_name(lorawan_err));
+    }
+#endif
 
     publish_startup_status();
     if (display.ops != NULL && xTaskCreate(hmi_task, "hmi", 4096, NULL, 5, NULL) != pdPASS) abort();

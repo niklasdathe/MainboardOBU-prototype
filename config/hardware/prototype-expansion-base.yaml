@@ -2,9 +2,10 @@ name: xiao-s3-expansion-base-prototype
 mcu: xiao-esp32-s3
 notes:
   - Direct stacking of the Seeed CAN board is not allowed while L76K uses D7.
-  - SPI is intentionally shared by SD and C5; each device has a separate chip select.
+  - SPI2 is intentionally shared by SD, C5 and Wio-SX1262; each SPI device has a separate chip select.
   - The C5 link uses 20 ms master polling and therefore does not require a DATA_READY wire.
   - D1 is occupied by the Expansion Base user button and is not assigned to the C5 link.
+  - Wio-SX1262 B2B NSS is GPIO41/D12; when LoRaWAN is enabled, move the L76K PPS carrier from D12 to GPIO47.
 buses:
   i2c0:
     kind: i2c
@@ -35,9 +36,18 @@ devices:
   c5_spi:
     bus: spi2
     pins: {cs: D0}
+  wio_sx1262:
+    bus: spi2
+    owner: esp32-s3
+    pins: {cs: D12}
+    lines:
+      dio1: GPIO39
+      reset: GPIO42
+      busy: GPIO40
+      antenna_switch: GPIO38
   l76k:
     bus: gnss_uart
-    pins: {pps_carrier: D12}
+    pins: {pps_carrier: GPIO47}
 reserved_conflicts:
   xiao_can_expansion:
     reason: MCP2515 CS is D7 on the unmodified Seeed board, colliding with L76K RX.
