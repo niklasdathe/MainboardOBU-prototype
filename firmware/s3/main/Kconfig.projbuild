@@ -51,6 +51,12 @@ config OBU_GEIGER_COUNTER_DURATION_MS
 config OBU_OTM_DIRECT_ENABLE
     bool "Enable direct OpenTrafficMap Wi-Fi uploader"
     default n
+    select OBU_DNS_FALLBACK_ENABLE
+    help
+        Enable the development Wi-Fi/MQTT uplink to OpenTrafficMap. A fallback
+        DNS resolver is always enabled with this uploader so stale sdkconfig
+        state or a broken DHCP DNS relay cannot silently leave MQTT unable to
+        resolve the broker hostname.
 
 config OBU_WIFI_DEBUG
     bool "Enable Wi-Fi debug diagnostics"
@@ -65,24 +71,21 @@ config OBU_WIFI_DEBUG
         normally remain disabled outside troubleshooting sessions.
 
 config OBU_DNS_FALLBACK_ENABLE
-    bool "Enable fallback DNS for the OpenTrafficMap uploader"
-    depends on OBU_OTM_DIRECT_ENABLE
+    bool
     default y
     help
-        Install a static ESP-NETIF fallback DNS server after DHCP completes.
-        DHCP still controls the main and backup DNS servers; this fallback is
-        used to improve development uploader reliability on hotspots or routers
-        whose DHCP-provided DNS relay is unavailable or unreliable.
+        Internal guard for the direct OpenTrafficMap uploader fallback DNS.
+        OBU_OTM_DIRECT_ENABLE selects this option so an existing generated
+        sdkconfig cannot accidentally leave DNS fallback disabled.
 
 config OBU_DNS_FALLBACK_IPV4
     string "Fallback DNS IPv4 address"
-    depends on OBU_DNS_FALLBACK_ENABLE
+    depends on OBU_OTM_DIRECT_ENABLE
     default "1.1.1.1"
     help
-        IPv4 address used for ESP_NETIF_DNS_FALLBACK. The default is the
-        Cloudflare public resolver. Change this for networks that require a
-        different resolver or disable OBU_DNS_FALLBACK_ENABLE to use only the
-        DNS servers supplied by DHCP.
+        IPv4 address used for ESP_NETIF_DNS_FALLBACK. DHCP continues to control
+        the main and backup DNS servers; this address is used only as the
+        fallback resolver when the network-provided resolver is unavailable.
 
 config OBU_OTM_TLS_TRACE
     bool "Enable verbose OpenTrafficMap TLS handshake tracing"
