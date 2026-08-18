@@ -1,0 +1,65 @@
+menu "Parked direct S3 Wi-Fi OpenTrafficMap uploader"
+
+config OBU_OTM_DIRECT_ENABLE
+    bool "Enable direct OpenTrafficMap Wi-Fi uploader"
+    default n
+    select OBU_DNS_FALLBACK_ENABLE
+    help
+        Enable the parked development Wi-Fi/MQTT uplink to OpenTrafficMap.
+        This component is excluded from normal S3 builds. Re-enable the
+        component deliberately before using these options.
+
+config OBU_WIFI_DEBUG
+    bool "Enable Wi-Fi debug diagnostics"
+    depends on OBU_OTM_DIRECT_ENABLE
+    default n
+    help
+        Enable additional development diagnostics for the S3 Wi-Fi uplink.
+        The firmware logs Wi-Fi driver/netif debug output, the effective STA
+        configuration, association details, disconnect reason names and the
+        DHCP/IP transition without printing the configured Wi-Fi password.
+
+config OBU_DNS_FALLBACK_ENABLE
+    bool
+    default y
+    help
+        Internal guard for the direct OpenTrafficMap uploader fallback DNS.
+        OBU_OTM_DIRECT_ENABLE selects this option so an existing generated
+        sdkconfig cannot accidentally leave DNS fallback disabled.
+
+config OBU_DNS_FALLBACK_IPV4
+    string "Fallback DNS IPv4 address"
+    depends on OBU_DNS_FALLBACK_ENABLE
+    default "1.1.1.1"
+    help
+        IPv4 address used for ESP_NETIF_DNS_FALLBACK. DHCP continues to control
+        the main and backup DNS servers; this address is used only as the
+        fallback resolver when the network-provided resolver is unavailable.
+
+config OBU_OTM_TLS_TRACE
+    bool "Enable verbose OpenTrafficMap TLS handshake tracing"
+    depends on OBU_OTM_DIRECT_ENABLE
+    default n
+    select MBEDTLS_DEBUG
+    help
+        Enable ESP-IDF/mbedTLS internal TLS handshake tracing while diagnosing
+        OpenTrafficMap broker connection failures. This is noisy development
+        instrumentation and should only be enabled explicitly for short
+        diagnostic captures.
+
+config OBU_WIFI_SSID
+    string "Development Wi-Fi SSID"
+    depends on OBU_OTM_DIRECT_ENABLE
+    default ""
+
+config OBU_WIFI_PASSWORD
+    string "Development Wi-Fi password"
+    depends on OBU_OTM_DIRECT_ENABLE
+    default ""
+
+config OBU_OTM_NODE_ID
+    string "OpenTrafficMap node id"
+    depends on OBU_OTM_DIRECT_ENABLE
+    default "bicycleobu-prototype"
+
+endmenu
