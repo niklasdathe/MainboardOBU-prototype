@@ -239,20 +239,54 @@ static bool ensure_joined(obu_lorawan_t *u)
         return true;
     }
 
-    stats_inc(&u->stats.join_attempts, &u->stats_lock);
-    ESP_LOGI(TAG, "Joining LoRaWAN network using OTAA");
-    int16_t state = u->node->activateOTAA();
-    if (state == RADIOLIB_LORAWAN_NEW_SESSION ||
-        state == RADIOLIB_LORAWAN_SESSION_RESTORED) {
-        stats_set_joined(u, true);
-        ESP_LOGI(TAG, "LoRaWAN OTAA active (RadioLib state=%d)", (int)state);
-        return true;
-    }
+    for (;;) {
+        if (!obu_lorawan_persistence_healthy()) {
+            ESP_LOGE(TAG,
+                     "LoRaWAN join blocked because durable nonce/session storage is unhealthy");
+            stats_set_joined(u, false);
+            return false;
+        }
 
-    stats_inc(&u->stats.join_failures, &u->stats_lock);
-    stats_set_joined(u, false);
-    ESP_LOGW(TAG, "LoRaWAN OTAA join failed: RadioLib state=%d", (int)state);
-    return false;
+        RadioLibTime_t wait_ms = u->node->timeUntilUplink();
+        if (wait_ms > 0) {
+            ESP_LOGI(TAG,
+                     "LoRaWAN join duty-cycle wait: %lu ms",
+                     (unsigned long)wait_ms);
+            vTaskDelay(pdMS_TO_TICKS((uint32_t)wait_ms));
+        }
+
+        ESP_LOGI(TAG, "Joining LoRaWAN network using OTAA");
+        const int16_t state = u->node->activateOTAA();
+
+        if (state == RADIOLIB_ERR_UPLINK_UNAVAILABLE) {
+            /*
+             * The legal transmit deadline may move slightly between
+             * timeUntilUplink() and activateOTAA(). This is a duty-cycle gate,
+             * not a failed OTAA exchange, so wait for RadioLib's next legal
+             * uplink time and retry without counting a join failure.
+             */
+            wait_ms = u->node->timeUntilUplink();
+            if (wait_ms == 0) wait_ms = 1;
+            ESP_LOGD(TAG,
+                     "LoRaWAN join became unavailable before TX; retrying after %lu ms",
+                     (unsigned long)wait_ms);
+            vTaskDelay(pdMS_TO_TICKS((uint32_t)wait_ms));
+            continue;
+        }
+
+        stats_inc(&u->stats.join_attempts, &u->stats_lock);
+        if (state == RADIOLIB_LORAWAN_NEW_SESSION ||
+            state == RADIOLIB_LORAWAN_SESSION_RESTORED) {
+            stats_set_joined(u, true);
+            ESP_LOGI(TAG, "LoRaWAN OTAA active (RadioLib state=%d)", (int)state);
+            return true;
+        }
+
+        stats_inc(&u->stats.join_failures, &u->stats_lock);
+        stats_set_joined(u, false);
+        ESP_LOGW(TAG, "LoRaWAN OTAA join failed: RadioLib state=%d", (int)state);
+        return false;
+    }
 }
 
 static int16_t send_payload_when_allowed(obu_lorawan_t *u,
