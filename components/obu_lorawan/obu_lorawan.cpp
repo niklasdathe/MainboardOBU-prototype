@@ -5,11 +5,14 @@
 #include <new>
 #include <string.h>
 
+#include "sdkconfig.h"
 #include <RadioLib.h>
+#include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
 static const char *TAG = "obu_lorawan";
 
@@ -17,7 +20,29 @@ static constexpr uint8_t FRAG_MAGIC_0 = 0x42;  // 'B'
 static constexpr uint8_t FRAG_MAGIC_1 = 0x4f;  // 'O'
 static constexpr size_t FRAG_HEADER_BYTES = OBU_LORAWAN_FRAGMENT_HEADER_BYTES;
 static constexpr uint32_t SEEED_WIO_RF_SW1_GPIO = 38U;
-static constexpr float SEEED_WIO_TCXO_VOLTAGE = 3.0f;
+/*
+ * Match the known-working Meshtastic XIAO ESP32-S3 + Wio-SX1262 board
+ * definition and the Seeed module TCXO supply: DIO3 drives the TCXO at 1.8 V.
+ */
+static constexpr float SEEED_WIO_TCXO_VOLTAGE = 1.8f;
+
+#ifdef CONFIG_OBU_LORAWAN_DEBUG
+#define LORA_DIAG(fmt, ...) ESP_LOGI(TAG, "debug: " fmt, ##__VA_ARGS__)
+#else
+#define LORA_DIAG(...) do { } while (0)
+#endif
+
+#ifdef CONFIG_OBU_LORAWAN_RADIOLIB_PROTOCOL_DEBUG
+static constexpr const char *RADIOLIB_PROTOCOL_DEBUG_STATE = "on";
+#else
+static constexpr const char *RADIOLIB_PROTOCOL_DEBUG_STATE = "off";
+#endif
+
+#ifdef CONFIG_OBU_LORAWAN_RADIOLIB_SPI_DEBUG
+static constexpr const char *RADIOLIB_SPI_DEBUG_STATE = "on";
+#else
+static constexpr const char *RADIOLIB_SPI_DEBUG_STATE = "off";
+#endif
 
 typedef struct {
     uint16_t len;
@@ -37,6 +62,38 @@ struct obu_lorawan {
     obu_lorawan_stats_t stats = {};
     portMUX_TYPE stats_lock = portMUX_INITIALIZER_UNLOCKED;
 };
+
+static const char *radiolib_state_name(int16_t state)
+{
+    switch (state) {
+        case RADIOLIB_ERR_NONE: return "OK";
+        case RADIOLIB_ERR_UPLINK_UNAVAILABLE: return "UPLINK_UNAVAILABLE";
+        case RADIOLIB_ERR_NETWORK_NOT_JOINED: return "NETWORK_NOT_JOINED";
+        case RADIOLIB_ERR_JOIN_NONCE_INVALID: return "JOIN_NONCE_INVALID";
+        case RADIOLIB_ERR_MIC_MISMATCH: return "MIC_MISMATCH";
+        case RADIOLIB_ERR_NO_JOIN_ACCEPT: return "NO_JOIN_ACCEPT";
+        case RADIOLIB_LORAWAN_SESSION_RESTORED: return "SESSION_RESTORED";
+        case RADIOLIB_LORAWAN_NEW_SESSION: return "NEW_SESSION";
+        default: return "OTHER";
+    }
+}
+
+static void debug_radio_lines(const obu_lorawan_t *u, const char *phase)
+{
+#ifdef CONFIG_OBU_LORAWAN_DEBUG
+    if (u == nullptr) return;
+    ESP_LOGI(TAG,
+             "debug: %s radio-lines DIO1=%d BUSY=%d RF_SW1=%d uptime_us=%lld",
+             phase,
+             gpio_get_level((gpio_num_t)u->config.dio1_gpio),
+             gpio_get_level((gpio_num_t)u->config.busy_gpio),
+             gpio_get_level((gpio_num_t)SEEED_WIO_RF_SW1_GPIO),
+             (long long)esp_timer_get_time());
+#else
+    (void)u;
+    (void)phase;
+#endif
+}
 
 static void stats_set_joined(obu_lorawan_t *u, bool joined)
 {
@@ -133,6 +190,21 @@ static bool ensure_radio(obu_lorawan_t *u)
 {
     if (u->radio_ready) return true;
 
+    LORA_DIAG("initializing Wio-SX1262: SPI%d SCK=%d MISO=%d MOSI=%d NSS=%d DIO1=%d RESET=%d BUSY=%d RXEN=%u TXEN=NC DIO2_RF_SWITCH=yes TCXO=%.1fV protocol_trace=%s spi_trace=%s FreeRTOS_Hz=%d",
+              (int)u->config.host,
+              u->config.sck_gpio,
+              u->config.miso_gpio,
+              u->config.mosi_gpio,
+              u->config.nss_gpio,
+              u->config.dio1_gpio,
+              u->config.reset_gpio,
+              u->config.busy_gpio,
+              (unsigned)SEEED_WIO_RF_SW1_GPIO,
+              (double)SEEED_WIO_TCXO_VOLTAGE,
+              RADIOLIB_PROTOCOL_DEBUG_STATE,
+              RADIOLIB_SPI_DEBUG_STATE,
+              (int)CONFIG_FREERTOS_HZ);
+
     if (u->hal == nullptr) {
         u->hal = new (std::nothrow) EspHal((int8_t)u->config.sck_gpio,
                                            (int8_t)u->config.miso_gpio,
@@ -152,8 +224,10 @@ static bool ensure_radio(obu_lorawan_t *u)
     }
 
     /*
-     * Seeed's XIAO ESP32-S3 + Wio-SX1262 BSP controls the board-level RF
-     * switch with GPIO38. RadioLib owns the pin once this is configured.
+     * The Wio-SX1262 carrier exposes its external receive-enable RF switch on
+     * GPIO38. RadioLib drives this RXEN high while receiving and leaves the
+     * unused MCU TXEN as NC. SX1262 DIO2 separately controls the module's
+     * internal TX/RX RF switch.
      */
     u->module->setRfSwitchPins(SEEED_WIO_RF_SW1_GPIO, RADIOLIB_NC);
 
@@ -162,22 +236,20 @@ static bool ensure_radio(obu_lorawan_t *u)
         if (u->radio == nullptr) return false;
     }
 
-    /*
-     * Seeed's official SX1262 BSP configures the DIO3-controlled TCXO rail at
-     * 3.0 V. Keep that value here rather than relying on unrelated board
-     * definitions with different oscillator supplies.
-     */
     int16_t state = u->radio->begin(868.0, 125.0, 9, 7,
                                     RADIOLIB_SX126X_SYNC_WORD_PRIVATE,
                                     10, 8, SEEED_WIO_TCXO_VOLTAGE, false);
     if (state != RADIOLIB_ERR_NONE) {
-        ESP_LOGE(TAG, "SX1262 initialization failed: RadioLib state=%d", (int)state);
+        ESP_LOGE(TAG, "SX1262 initialization failed: RadioLib state=%d (%s)",
+                 (int)state, radiolib_state_name(state));
         return false;
     }
+    debug_radio_lines(u, "after-radio-begin");
 
     state = u->radio->setDio2AsRfSwitch(true);
     if (state != RADIOLIB_ERR_NONE) {
-        ESP_LOGE(TAG, "SX1262 DIO2 RF-switch setup failed: RadioLib state=%d", (int)state);
+        ESP_LOGE(TAG, "SX1262 DIO2 RF-switch setup failed: RadioLib state=%d (%s)",
+                 (int)state, radiolib_state_name(state));
         return false;
     }
 
@@ -198,7 +270,8 @@ static bool ensure_radio(obu_lorawan_t *u)
 
     state = u->node->beginOTAA(join_eui, dev_eui, nwk_key, app_key);
     if (state != RADIOLIB_ERR_NONE) {
-        ESP_LOGE(TAG, "LoRaWAN OTAA configuration failed: RadioLib state=%d", (int)state);
+        ESP_LOGE(TAG, "LoRaWAN OTAA configuration failed: RadioLib state=%d (%s)",
+                 (int)state, radiolib_state_name(state));
         return false;
     }
 
@@ -228,6 +301,7 @@ static bool ensure_radio(obu_lorawan_t *u)
              (unsigned)SEEED_WIO_RF_SW1_GPIO, (double)SEEED_WIO_TCXO_VOLTAGE,
              restored_persistence ? "yes" : "no",
              restored_session ? "yes" : "no");
+    LORA_DIAG("OTAA configured for EU868; credentials parsed successfully; root keys intentionally not logged");
     return true;
 }
 
@@ -248,6 +322,8 @@ static bool ensure_joined(obu_lorawan_t *u)
         }
 
         RadioLibTime_t wait_ms = u->node->timeUntilUplink();
+        LORA_DIAG("join preflight: activated=no persistence=healthy timeUntilUplink=%lu ms",
+                  (unsigned long)wait_ms);
         if (wait_ms > 0) {
             ESP_LOGI(TAG,
                      "LoRaWAN join duty-cycle wait: %lu ms",
@@ -255,8 +331,18 @@ static bool ensure_joined(obu_lorawan_t *u)
             vTaskDelay(pdMS_TO_TICKS((uint32_t)wait_ms));
         }
 
+        debug_radio_lines(u, "before-activateOTAA");
         ESP_LOGI(TAG, "Joining LoRaWAN network using OTAA");
+        const int64_t join_start_us = esp_timer_get_time();
         const int16_t state = u->node->activateOTAA();
+        const int64_t join_elapsed_ms = (esp_timer_get_time() - join_start_us) / 1000LL;
+        debug_radio_lines(u, "after-activateOTAA");
+        LORA_DIAG("activateOTAA returned state=%d (%s) elapsed=%lld ms activated=%s next_uplink=%lu ms",
+                  (int)state,
+                  radiolib_state_name(state),
+                  (long long)join_elapsed_ms,
+                  u->node->isActivated() ? "yes" : "no",
+                  (unsigned long)u->node->timeUntilUplink());
 
         if (state == RADIOLIB_ERR_UPLINK_UNAVAILABLE) {
             /*
@@ -267,9 +353,8 @@ static bool ensure_joined(obu_lorawan_t *u)
              */
             wait_ms = u->node->timeUntilUplink();
             if (wait_ms == 0) wait_ms = 1;
-            ESP_LOGD(TAG,
-                     "LoRaWAN join became unavailable before TX; retrying after %lu ms",
-                     (unsigned long)wait_ms);
+            LORA_DIAG("join became unavailable before TX; duty-cycle retry after %lu ms",
+                      (unsigned long)wait_ms);
             vTaskDelay(pdMS_TO_TICKS((uint32_t)wait_ms));
             continue;
         }
@@ -278,13 +363,24 @@ static bool ensure_joined(obu_lorawan_t *u)
         if (state == RADIOLIB_LORAWAN_NEW_SESSION ||
             state == RADIOLIB_LORAWAN_SESSION_RESTORED) {
             stats_set_joined(u, true);
-            ESP_LOGI(TAG, "LoRaWAN OTAA active (RadioLib state=%d)", (int)state);
+            ESP_LOGI(TAG,
+                     "LoRaWAN OTAA active: RadioLib state=%d (%s) elapsed=%lld ms",
+                     (int)state,
+                     radiolib_state_name(state),
+                     (long long)join_elapsed_ms);
             return true;
         }
 
         stats_inc(&u->stats.join_failures, &u->stats_lock);
         stats_set_joined(u, false);
-        ESP_LOGW(TAG, "LoRaWAN OTAA join failed: RadioLib state=%d", (int)state);
+        ESP_LOGW(TAG,
+                 "LoRaWAN OTAA join failed: RadioLib state=%d (%s) elapsed=%lld ms",
+                 (int)state,
+                 radiolib_state_name(state),
+                 (long long)join_elapsed_ms);
+        if (state == RADIOLIB_ERR_NO_JOIN_ACCEPT) {
+            LORA_DIAG("NO_JOIN_ACCEPT: correlate the same TTS uplink correlation ID with ns.down.join.schedule.* and gs.down.tx.*; RLB_PRO should show RX1/RX2 frequency, data rate and window outcome");
+        }
         return false;
     }
 }
@@ -327,9 +423,8 @@ static int16_t send_payload_when_allowed(obu_lorawan_t *u,
          */
         wait_ms = u->node->timeUntilUplink();
         if (wait_ms == 0) wait_ms = 1;
-        ESP_LOGD(TAG,
-                 "LoRaWAN uplink became unavailable before TX; retrying fragment after %lu ms",
-                 (unsigned long)wait_ms);
+        LORA_DIAG("uplink became unavailable before TX; retrying fragment after %lu ms",
+                  (unsigned long)wait_ms);
         vTaskDelay(pdMS_TO_TICKS((uint32_t)wait_ms));
     }
 }
@@ -368,11 +463,12 @@ static bool send_frame(obu_lorawan_t *u, const queued_frame_t *frame)
         if (state < RADIOLIB_ERR_NONE) {
             stats_inc(&u->stats.tx_errors, &u->stats_lock);
             ESP_LOGW(TAG,
-                     "LoRaWAN fragment TX failed: frame=%u fragment=%u/%u state=%d",
+                     "LoRaWAN fragment TX failed: frame=%u fragment=%u/%u state=%d (%s)",
                      (unsigned)frame_sequence,
                      (unsigned)(fragment_index + 1U),
                      (unsigned)fragment_count,
-                     (int)state);
+                     (int)state,
+                     radiolib_state_name(state));
             if (state == RADIOLIB_ERR_NETWORK_NOT_JOINED) {
                 stats_set_joined(u, false);
             }
@@ -380,13 +476,14 @@ static bool send_frame(obu_lorawan_t *u, const queued_frame_t *frame)
         }
 
         stats_inc(&u->stats.fragments_sent, &u->stats_lock);
-        ESP_LOGD(TAG,
-                 "LoRaWAN fragment sent: frame=%u fragment=%u/%u bytes=%u fport=%u",
-                 (unsigned)frame_sequence,
-                 (unsigned)(fragment_index + 1U),
-                 (unsigned)fragment_count,
-                 (unsigned)(FRAG_HEADER_BYTES + part_len),
-                 (unsigned)u->config.fport);
+        LORA_DIAG("fragment sent: frame=%u fragment=%u/%u bytes=%u fport=%u state=%d (%s)",
+                  (unsigned)frame_sequence,
+                  (unsigned)(fragment_index + 1U),
+                  (unsigned)fragment_count,
+                  (unsigned)(FRAG_HEADER_BYTES + part_len),
+                  (unsigned)u->config.fport,
+                  (int)state,
+                  radiolib_state_name(state));
 
         if (fragment_index + 1U < fragment_count) {
             vTaskDelay(pdMS_TO_TICKS(u->config.min_fragment_interval_ms));
@@ -446,6 +543,13 @@ extern "C" esp_err_t obu_lorawan_start(const obu_lorawan_config_t *config, obu_l
         ESP_LOGI(TAG, "Wio-SX1262 LoRaWAN uplink disabled");
         return ESP_OK;
     }
+
+#ifdef CONFIG_OBU_LORAWAN_DEBUG
+    ESP_LOGI(TAG,
+             "LoRaWAN debug diagnostics enabled: RadioLib protocol=%s SPI=%s",
+             RADIOLIB_PROTOCOL_DEBUG_STATE,
+             RADIOLIB_SPI_DEBUG_STATE);
+#endif
 
     uint64_t join_eui = 0;
     uint64_t dev_eui = 0;
