@@ -246,6 +246,25 @@ RP002 1.0.4
 
 RadioLib's pre-join EU868 RX2 trace is 869.525 MHz / DR0 (SF12/BW125), so the current TTS frequency-plan choice removes the prior potential SF9-vs-SF12 RX2 ambiguity for the join itself.
 
+### 9. Configurable initial JoinRequest data rate added
+
+To separate public-gateway/link-budget failures from protocol/RX-window failures, the firmware now exposes:
+
+```text
+BicycleOBU prototype
+  -> LoRaWAN uplink
+     -> Activation and network
+        -> Initial OTAA uplink data rate (EU868 DR0..DR5)
+```
+
+Mapping:
+
+```text
+DR0=SF12, DR1=SF11, DR2=SF10, DR3=SF9, DR4=SF8, DR5=SF7
+```
+
+all at BW125. Default is DR3 to preserve previous behavior. For a new/pending activation RadioLib applies the configured DR with ADR temporarily disabled, then ADR is re-enabled. A restored session is not overwritten. DR0 is the next intended coverage diagnostic when TTS receives no DR3 JoinRequest.
+
 ## Current hypotheses and discriminating tests
 
 ### A. Current JoinRequest is not reaching a TTN gateway
@@ -264,9 +283,9 @@ Likely variables now include:
 
 Next tests:
 
-1. test much closer to a known active TTN EU868 gateway, or use a controlled local multi-channel gateway;
-2. verify antenna/IPEX seating and use an 868 MHz antenna;
-3. optionally add/use a configurable initial OTAA uplink DR and force EU868 DR0/SF12 for one coverage diagnostic; this increases receiver link budget without changing TX power;
+1. set initial OTAA DR to **DR0/SF12** and verify the protocol trace changes accordingly;
+2. test much closer to a known active TTN EU868 gateway, or use a controlled local multi-channel gateway;
+3. verify antenna/IPEX seating and use an 868 MHz antenna;
 4. only proceed to JoinAccept investigation after the JoinRequest appears in TTS.
 
 ### B. JoinAccept is accepted by TTS but not actually transmitted
@@ -305,12 +324,14 @@ RadioLib is now the intended `12e3ed6c...` merge commit. Current hardware tests 
 
 1. Keep the current matching TTS identity/keys and **do not erase NVS**.
 2. Keep RadioLib `12e3ed6c...`; after any dependency cleanup verify the build prints this exact commit.
-3. Prefer ESP-IDF 6.1 for the final controlled run.
-4. Move close to a known active TTN gateway or use a controlled EU868 gateway.
-5. Watch TTS Live Data during a JoinRequest.
-6. If no event appears, debug uplink/link budget/antenna/gateway availability. Do not spend time on RX1/RX2 yet.
-7. If an event appears and `js.join.accept` succeeds, inspect `ns.down.join.schedule.*` and `gs.down.tx.*` for the same correlation ID.
-8. Only after a gateway-transmitted JoinAccept is proven should full SPI/RXEN diagnostics be enabled.
+3. In menuconfig set **Initial OTAA uplink data rate = 0 (DR0/SF12)** for one coverage test.
+4. Flash normally, not `erase-flash`, and verify `RLB_PRO` reports the JoinRequest at SF12/BW125.
+5. Prefer ESP-IDF 6.1 for the final controlled run.
+6. Move close to a known active TTN gateway or use a controlled EU868 gateway.
+7. Watch TTS Live Data during the JoinRequest.
+8. If no event appears even at DR0 near a known gateway, debug the uplink antenna/RF path rather than RX1/RX2.
+9. If an event appears and `js.join.accept` succeeds, inspect `ns.down.join.schedule.*` and `gs.down.tx.*` for the same correlation ID.
+10. Only after a gateway-transmitted JoinAccept is proven should full SPI/RXEN diagnostics be enabled.
 
 ## Evidence files
 
