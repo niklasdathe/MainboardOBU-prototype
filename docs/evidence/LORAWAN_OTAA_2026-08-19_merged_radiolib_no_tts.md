@@ -121,12 +121,36 @@ Seeed's Wio-SX1262 datasheet specifies:
 
 The current 1.8 V DIO3 setting is therefore electrically valid. Current Meshtastic XIAO/Wio support also uses DIO3 TCXO 1.8 V, GPIO38 RXEN, TXEN NC, and DIO2 RF-switch control.
 
+## Follow-up diagnostic added after this capture
+
+The firmware now exposes a configurable initial OTAA JoinRequest data rate under:
+
+```text
+BicycleOBU prototype
+  -> LoRaWAN uplink
+     -> Activation and network
+        -> Initial OTAA uplink data rate (EU868 DR0..DR5)
+```
+
+EU868 mapping used by the option is:
+
+```text
+DR0 = SF12/BW125
+DR1 = SF11/BW125
+DR2 = SF10/BW125
+DR3 = SF9/BW125
+DR4 = SF8/BW125
+DR5 = SF7/BW125
+```
+
+Default is DR3 to preserve the previous behavior. DR0 is intended as the next coverage diagnostic because it maximizes receiver link budget at the cost of much higher airtime. RadioLib `setDatarate()` is called before activation while ADR is temporarily disabled; ADR is then re-enabled for normal network-controlled operation. A restored valid session is not overwritten by the diagnostic join-DR setting.
+
 ## Next discriminating tests
 
 1. Do **not** erase NVS. The local DevNonce state is valid and should continue advancing.
 2. Keep the current matching TTS registration and root keys.
-3. Test physically much closer to a known active TTN EU868 gateway, or preferably against a controlled local multi-channel gateway.
-4. If public coverage must be used, consider temporarily forcing the OTAA JoinRequest uplink data rate to EU868 DR0/SF12 to maximize link budget. RadioLib exposes `LoRaWANNode::setDatarate()`; this should be a diagnostic/configurable option rather than a permanent assumption.
+3. Set the initial OTAA data rate to **DR0** for one coverage diagnostic and verify `RLB_PRO` shows an SF12 JoinRequest.
+4. Test physically much closer to a known active TTN EU868 gateway, or preferably against a controlled local multi-channel gateway.
 5. Watch TTS Live Data. Only when a JoinRequest appears should the investigation return to `js.join.accept`, `ns.down.join.schedule.*`, and `gs.down.tx.*`.
 6. If TTS proves a JoinAccept was transmitted and the merged RadioLib build still closes RX1/RX2 empty, perform one full `RLB_SPI` capture plus GPIO38/RXEN transition measurement.
 7. Repeat the final comparison under ESP-IDF 6.1 to match CI/reference tooling.
