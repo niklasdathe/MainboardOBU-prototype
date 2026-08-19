@@ -10,6 +10,8 @@ config OBU_GNSS_PPS_GPIO
         must be rewired to GPIO47. Override only for a hardware profile without
         the Wio-SX1262 attached.
 
+menu "Local warning and V2X diagnostics"
+
 config OBU_BUZZER_ENABLE
     bool "Enable Expansion Base local warning buzzer"
     default y
@@ -57,5 +59,128 @@ config OBU_GEIGER_COUNTER_DURATION_MS
     depends on OBU_GEIGER_COUNTER_ENABLE
     range 10 200
     default 25
+
+endmenu
+
+menu "LoRaWAN uplink"
+
+config OBU_LORAWAN_ENABLE
+    bool "Enable Wio-SX1262 LoRaWAN uplink"
+    default n
+    help
+        Enable the Seeed XIAO ESP32-S3 + Wio-SX1262 B2B radio as a
+        best-effort LoRaWAN uplink for received raw C-ITS frames. The device
+        sends binary fragments to a LoRaWAN network server; a server-side
+        bridge reassembles them and publishes the original frame to
+        OpenTrafficMap MQTT.
+
+menu "Activation and network"
+    depends on OBU_LORAWAN_ENABLE
+
+config OBU_LORAWAN_JOIN_EUI
+    string "JoinEUI (16 hex digits)"
+    default "0000000000000000"
+
+config OBU_LORAWAN_DEV_EUI
+    string "DevEUI (16 hex digits)"
+    default ""
+
+config OBU_LORAWAN_NWK_KEY
+    string "NwkKey (32 hex digits)"
+    default ""
+
+config OBU_LORAWAN_APP_KEY
+    string "AppKey (32 hex digits)"
+    default ""
+
+endmenu
+
+menu "Payload and buffering"
+    depends on OBU_LORAWAN_ENABLE
+
+config OBU_LORAWAN_FPORT
+    int "Raw-frame fragment FPort"
+    range 1 223
+    default 10
+
+config OBU_LORAWAN_MAX_FRAME_BYTES
+    int "Maximum raw C-ITS frame forwarded"
+    range 64 512
+    default 512
+    help
+        Larger 802.11p frames are dropped rather than truncated. OpenTrafficMap
+        must receive the original frame bytes intact.
+
+config OBU_LORAWAN_FRAGMENT_DATA_BYTES
+    int "Raw bytes per LoRaWAN fragment"
+    range 8 32
+    default 32
+    help
+        The BicycleOBU fragment header is 12 bytes. A 32-byte data fragment
+        therefore creates a 44-byte LoRaWAN application payload, conservative
+        enough for low EU868 data rates.
+
+config OBU_LORAWAN_QUEUE_DEPTH
+    int "Pending raw-frame queue depth"
+    range 1 8
+    default 4
+
+endmenu
+
+menu "Airtime and retry scheduling"
+    depends on OBU_LORAWAN_ENABLE
+
+config OBU_LORAWAN_MIN_FRAGMENT_INTERVAL_MS
+    int "Minimum delay between fragment uplinks (ms)"
+    range 1000 600000
+    default 10000
+    help
+        This is an additional application-side throttle. RadioLib LoRaWAN duty
+        cycle handling remains enabled and is the authoritative regulatory gate.
+
+config OBU_LORAWAN_JOIN_RETRY_MS
+    int "Delay after an actual OTAA failure (ms)"
+    range 5000 600000
+    default 60000
+    help
+        Delay after an OTAA exchange fails. Duty-cycle restrictions are handled
+        separately using RadioLib timeUntilUplink() and are not counted as join
+        failures.
+
+endmenu
+
+menu "Diagnostics"
+    depends on OBU_LORAWAN_ENABLE
+
+config OBU_LORAWAN_DEBUG
+    bool "Enable structured LoRaWAN ESP_LOG diagnostics"
+    default n
+    help
+        Add structured radio/join diagnostics through ESP_LOG, including radio
+        control-line state, join duration, RadioLib status names, timing and
+        persistence state. Root keys are never printed.
+
+config OBU_LORAWAN_RADIOLIB_PROTOCOL_DEBUG
+    bool "Enable RadioLib basic + protocol trace (RLB_DBG/RLB_PRO)"
+    depends on OBU_LORAWAN_DEBUG
+    default y
+    help
+        Compile RadioLib with RADIOLIB_DEBUG_BASIC and
+        RADIOLIB_DEBUG_PROTOCOL. This is the trace requested by RadioLib
+        maintainers for LoRaWAN receive-window failures. It is verbose and may
+        expose protocol identifiers/raw frames; review logs before sharing.
+
+config OBU_LORAWAN_RADIOLIB_SPI_DEBUG
+    bool "Enable RadioLib full SPI trace (RLB_SPI, extremely verbose)"
+    depends on OBU_LORAWAN_DEBUG
+    default n
+    help
+        Compile RadioLib with RADIOLIB_DEBUG_SPI. Enable only for a short
+        diagnostic capture when protocol tracing is insufficient; the output is
+        extremely large and can perturb timing if left enabled unnecessarily.
+
+endmenu
+
+endmenu
 
 endmenu
