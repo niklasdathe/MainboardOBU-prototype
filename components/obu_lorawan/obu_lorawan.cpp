@@ -302,20 +302,45 @@ static bool ensure_radio(obu_lorawan_t *u)
         return false;
     }
 
+    /*
+     * JoinRequest data rate is a local pre-activation choice. Do not overwrite
+     * receive/data-rate state restored from an already valid session. For a
+     * new/pending OTAA activation, set the requested EU868 DR while ADR is off,
+     * then enable ADR for normal network-controlled operation.
+     */
+    if (!restored_session) {
+        u->node->setADR(false);
+        state = u->node->setDatarate(u->config.join_datarate);
+        if (state != RADIOLIB_ERR_NONE) {
+            ESP_LOGE(TAG,
+                     "LoRaWAN initial OTAA data-rate setup failed: DR%u state=%d (%s)",
+                     (unsigned)u->config.join_datarate,
+                     (int)state,
+                     radiolib_state_name(state));
+            return false;
+        }
+        LORA_DIAG("initial OTAA uplink data rate set to EU868 DR%u",
+                  (unsigned)u->config.join_datarate);
+    }
+
     u->node->setADR(true);
     u->node->setDutyCycle(true);
 
     u->radio_ready = true;
     ESP_LOGI(TAG,
-             "Wio-SX1262 ready on shared SPI%d: SCK=%d MISO=%d MOSI=%d NSS=%d DIO1=%d RESET=%d BUSY=%d RF_SW1=%u TCXO=%.1fV persisted_nonces=%s restored_session=%s",
+             "Wio-SX1262 ready on shared SPI%d: SCK=%d MISO=%d MOSI=%d NSS=%d DIO1=%d RESET=%d BUSY=%d RF_SW1=%u TCXO=%.1fV persisted_nonces=%s restored_session=%s join_dr=%u",
              (int)u->config.host,
              u->config.sck_gpio, u->config.miso_gpio, u->config.mosi_gpio,
              u->config.nss_gpio, u->config.dio1_gpio,
              u->config.reset_gpio, u->config.busy_gpio,
              (unsigned)SEEED_WIO_RF_SW1_GPIO, (double)SEEED_WIO_TCXO_VOLTAGE,
              restored_persistence ? "yes" : "no",
-             restored_session ? "yes" : "no");
-    LORA_DIAG("OTAA configured for EU868; credentials parsed successfully; root keys intentionally not logged");
+             restored_session ? "yes" : "no",
+             (unsigned)u->config.join_datarate);
+    LORA_DIAG("OTAA configured for EU868: JoinEUI=%s DevEUI=%s initial_join_DR=%u; root keys intentionally not logged",
+              u->config.join_eui_hex,
+              u->config.dev_eui_hex,
+              (unsigned)u->config.join_datarate);
     return true;
 }
 
@@ -346,7 +371,9 @@ static bool ensure_joined(obu_lorawan_t *u)
         }
 
         debug_radio_lines(u, "before-activateOTAA");
-        ESP_LOGI(TAG, "Joining LoRaWAN network using OTAA");
+        ESP_LOGI(TAG,
+                 "Joining LoRaWAN network using OTAA (EU868 DR%u)",
+                 (unsigned)u->config.join_datarate);
         const int64_t join_start_us = esp_timer_get_time();
         const int16_t state = u->node->activateOTAA();
         const int64_t join_elapsed_ms = (esp_timer_get_time() - join_start_us) / 1000LL;
@@ -549,6 +576,7 @@ extern "C" esp_err_t obu_lorawan_start(const obu_lorawan_config_t *config, obu_l
         config->fragment_data_bytes == 0 ||
         config->fragment_data_bytes > OBU_LORAWAN_MAX_FRAGMENT_DATA_BYTES ||
         config->queue_depth == 0 ||
+        config->join_datarate > 5 ||
         config->fport == 0 ||
         config->fport > 223) {
         return ESP_ERR_INVALID_ARG;
@@ -608,7 +636,8 @@ extern "C" esp_err_t obu_lorawan_start(const obu_lorawan_config_t *config, obu_l
     }
 
     ESP_LOGI(TAG,
-             "LoRaWAN uplink worker started: EU868 fport=%u max_frame=%u fragment_data=%u queue=%u persistence=NVS",
+             "LoRaWAN uplink worker started: EU868 join_dr=%u fport=%u max_frame=%u fragment_data=%u queue=%u persistence=NVS",
+             (unsigned)config->join_datarate,
              (unsigned)config->fport,
              (unsigned)config->max_frame_bytes,
              (unsigned)config->fragment_data_bytes,
