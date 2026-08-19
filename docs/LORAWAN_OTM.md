@@ -94,6 +94,8 @@ GNSS PPS GPIO47
 
 When the S3 receives `OBU_IPC_RX_FRAME` from the C5, it enqueues the raw frame before the local event-bus size conversion. The queue is bounded and non-blocking so a slow LoRaWAN link cannot stall C5 acquisition.
 
+This is deliberately a **best-effort collection sample, not a lossless mirror of all ITS-G5 traffic**. ITS-G5 can arrive far faster than EU868 LoRaWAN is legally able to forward. When the bounded queue fills, older pending frames are discarded in favor of newer traffic; LoRaWAN duty-cycle timing always takes precedence. This keeps the safety/radio acquisition path independent of the uplink backlog.
+
 One raw frame is split into versioned binary fragments. Each fragment contains:
 
 ```text
@@ -105,7 +107,7 @@ whole-frame CRC16-CCITT
 fragment data
 ```
 
-The default fragment data size is 32 bytes and the application FPort is 10. Multiple LoRaWAN uplinks are therefore normally required for one ITS-G5 frame.
+The default fragment data size is 32 bytes and the application FPort is 10. Multiple LoRaWAN uplinks are therefore normally required for one ITS-G5 frame. At DR0/SF12 the airtime/duty-cycle delay can make completion of even one multi-fragment frame slow; for normal operation let ADR move the active session to a suitable faster data rate when link conditions allow.
 
 ## The Things Stack MQTT
 
