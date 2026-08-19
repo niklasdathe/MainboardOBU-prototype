@@ -99,6 +99,20 @@ static void stats_set_joined(obu_lorawan_t *u, bool joined)
 {
     portENTER_CRITICAL(&u->stats_lock);
     u->stats.joined = joined;
+    if (!joined) u->stats.link_metrics_valid = false;
+    portEXIT_CRITICAL(&u->stats_lock);
+}
+
+static void stats_set_link_metrics(obu_lorawan_t *u)
+{
+    if (u == nullptr || u->radio == nullptr) return;
+    const float rssi_dbm = u->radio->getRSSI();
+    const float snr_db = u->radio->getSNR();
+
+    portENTER_CRITICAL(&u->stats_lock);
+    u->stats.last_downlink_rssi_dbm = rssi_dbm;
+    u->stats.last_downlink_snr_db = snr_db;
+    u->stats.link_metrics_valid = true;
     portEXIT_CRITICAL(&u->stats_lock);
 }
 
@@ -363,6 +377,9 @@ static bool ensure_joined(obu_lorawan_t *u)
         if (state == RADIOLIB_LORAWAN_NEW_SESSION ||
             state == RADIOLIB_LORAWAN_SESSION_RESTORED) {
             stats_set_joined(u, true);
+            if (state == RADIOLIB_LORAWAN_NEW_SESSION) {
+                stats_set_link_metrics(u);
+            }
             ESP_LOGI(TAG,
                      "LoRaWAN OTAA active: RadioLib state=%d (%s) elapsed=%lld ms",
                      (int)state,
@@ -475,6 +492,9 @@ static bool send_frame(obu_lorawan_t *u, const queued_frame_t *frame)
             return false;
         }
 
+        if (state > RADIOLIB_ERR_NONE) {
+            stats_set_link_metrics(u);
+        }
         stats_inc(&u->stats.fragments_sent, &u->stats_lock);
         LORA_DIAG("fragment sent: frame=%u fragment=%u/%u bytes=%u fport=%u state=%d (%s)",
                   (unsigned)frame_sequence,
