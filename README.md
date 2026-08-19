@@ -12,7 +12,7 @@ This is a research prototype. Experimental safety and V2X-transmit functions are
 |---|---|
 | ESP32-C5 radio endpoint | ITS-G5 raw RX/TX boundary, metadata, bounded buffering, status and fail-safe per-boot TX arming implemented |
 | ESP32-S3 hub | Canonical event bus, SPI link, GNSS/time, OLED, local buzzer, SD diagnostic logging and optional LoRaWAN collection uplink implemented |
-| LoRaWAN OTM uplink | Wio-SX1262 OTAA/EU868 transport, bounded raw-frame fragmentation and The Things Stack MQTT -> OpenTrafficMap MQTT bridge implemented; RF/end-to-end hardware verification pending |
+| LoRaWAN OTM uplink | Wio-SX1262 OTAA/EU868 transport, NVS nonce/session persistence, bounded raw-frame fragmentation and TTS MQTT -> OpenTrafficMap bridge implemented; JoinRequest reaches/gets accepted by TTS but physical JoinAccept RX is still under investigation (`-1116`) |
 | Local warning output | Expansion Base passive buzzer on A3/D3 (XIAO S3 GPIO4), asynchronous output, runtime mute boundary and warning-episode deduplication implemented |
 | Hardware abstraction | Replaceable display, warning-output, radio, GNSS, uplink and standards interfaces; YAML hardware profiles validated at integration time |
 | ETSI VAM conformance | Explicit codec/PoTi/security/GN-BTP-DCC gates exist; production implementations and HIL/RF verification remain pending |
@@ -25,6 +25,7 @@ Source review and a successful firmware build are not complete-system validation
 |---|---|
 | Understand the component split | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
 | Configure Wio-SX1262 -> OpenTrafficMap | [`docs/LORAWAN_OTM.md`](docs/LORAWAN_OTM.md) |
+| Diagnose OTAA / JoinAccept failures | [`docs/LORAWAN_OTAA_DEBUG.md`](docs/LORAWAN_OTAA_DEBUG.md) |
 | Find the document for a development task | [`docs/README.md`](docs/README.md) |
 | Check workbook coverage and open verification | [`docs/REQUIREMENT_TRACEABILITY.md`](docs/REQUIREMENT_TRACEABILITY.md) |
 | Wire the Expansion Base prototype | [`docs/HARDWARE.md`](docs/HARDWARE.md) |
@@ -73,7 +74,7 @@ The display and buzzer are consumers of the S3 data model, not owners of warning
 | Expansion Base user button | onboard button | D1 = GPIO2; reserved by the base |
 | GNSS | XIAO L76K | UART D6/D7; PPS rewired to GPIO47 |
 | C5 link | XIAO ESP32-C5 | SPI D8/D9/D10, CS D0; no DATA_READY wire |
-| LoRaWAN | Wio-SX1262 on XIAO ESP32-S3 B2B | shared SPI; NSS GPIO41, DIO1 GPIO39, RESET GPIO42, BUSY GPIO40, RF switch GPIO38 |
+| LoRaWAN | Wio-SX1262 on XIAO ESP32-S3 B2B | shared SPI; NSS GPIO41, DIO1 GPIO39, RESET GPIO42, BUSY GPIO40, RXEN GPIO38, DIO2 internal RF switch, DIO3 TCXO 1.8 V |
 
 The default C5 link is polling-only: the S3 polls the C5 at most every 20 ms and initiates transactions immediately for outbound messages. This removes the former GPIO42/D11 `DATA_READY` connection and deliberately leaves D1 to the Expansion Base user button. A future carrier may enable an optional dedicated `DATA_READY` GPIO through `obu_ipc`.
 
@@ -98,7 +99,16 @@ cd tools/lorawan_otm_bridge
 python -m unittest discover -s tests -v
 ```
 
-The S3 defaults to the direct OpenTrafficMap Wi-Fi upload **off**. The Wio-SX1262 LoRaWAN uplink is also opt-in through menuconfig because OTAA credentials are deployment-specific. The local warning buzzer defaults **enabled and unmuted** but exposes a runtime mute boundary; the final authenticated BLE control implementation can bind to that boundary without changing the warning driver.
+LoRaWAN is configured under:
+
+```text
+BicycleOBU prototype
+  -> LoRaWAN uplink
+```
+
+Activation, payload/buffering, airtime/retry and diagnostics settings are grouped into separate submenus. For an OTAA investigation enable structured ESP_LOG diagnostics and RadioLib BASIC/PROTOCOL trace under `LoRaWAN uplink -> Diagnostics`; leave full SPI trace off unless a short low-level capture is required.
+
+The direct OpenTrafficMap Wi-Fi upload is parked and excluded from the normal S3 runtime. The Wio-SX1262 LoRaWAN uplink is opt-in because OTAA credentials are deployment-specific. The local warning buzzer defaults **enabled and unmuted** but exposes a runtime mute boundary; the final authenticated BLE control implementation can bind to that boundary without changing the warning driver.
 
 ## Source of truth
 
@@ -107,6 +117,7 @@ The S3 defaults to the direct OpenTrafficMap Wi-Fi upload **off**. The Wio-SX126
 | System/acceptance requirements | `BicycleOBU_Requirements_v1_1_ETSI_VITS_S.xlsx` in the parent project |
 | Prototype responsibilities and data flow | `docs/ARCHITECTURE.md` |
 | LoRaWAN/OpenTrafficMap setup | `docs/LORAWAN_OTM.md` |
+| OTAA/JoinAccept investigation history | `docs/LORAWAN_OTAA_DEBUG.md` |
 | Implemented/open requirement mapping | `docs/REQUIREMENT_TRACEABILITY.md` |
 | Pin ownership and accessory conflicts | `config/hardware/*.yaml` + `scripts/check_pin_plan.py` |
 | C5/S3 protocol | `components/obu_ipc/` |
