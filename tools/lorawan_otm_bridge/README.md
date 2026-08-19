@@ -11,84 +11,139 @@ C5 raw ITS-G5 frame
   -> its/<node-id>/packet
 ```
 
-OpenTrafficMap expects the packet payload as raw binary, not JSON or base64. The bridge also publishes the retained `its/<node-id>/status` state and a small `its/<node-id>/info` JSON document.
+OpenTrafficMap receives the raw binary frame, not JSON or base64. The bridge also publishes retained `its/<node-id>/status` and a compact `its/<node-id>/info` document.
 
-## 1. Create a TTS application API key
+## Recommended: always-on Ubuntu Docker deployment
 
-In The Things Stack Console, open the `bicycleobu` application and create an API key that can read application traffic. Keep the key outside Git and use it as the MQTT password.
+The container has no listening ports. It only creates outbound TLS connections to TTS and OpenTrafficMap, so no router port-forwarding is required.
 
-For The Things Network Sandbox the application MQTT username/topic prefix includes the tenant suffix, for example:
+Install Docker Engine + the Compose plugin on the Ubuntu server, clone the repository, then:
+
+```bash
+git switch agent/lorawan-otm-uplink
+git pull --ff-only
+cd tools/lorawan_otm_bridge
+cp .env.example .env
+nano .env
+```
+
+Set `TTS_MQTT_PASSWORD` to a TTS application API key that can read application traffic. Keep `.env` private; it is ignored by Git.
+
+Current prototype defaults in `.env.example` are already set for:
 
 ```text
-bicycleobu@ttn
+TTS host:       eu1.cloud.thethings.network
+TTS user/UID:   bicycleobu@ttn
+TTS device:     bicycleobu
+FPort:          10
+OTM broker:     cits1.opentrafficmap.org:8883
+OTM node:       bicycleobu-70b3d57ed0078c82
 ```
 
-## 2. Install the bridge
+Build and start once:
 
-PowerShell from the repository root:
-
-```powershell
-cd tools\lorawan_otm_bridge
-py -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
+```bash
+docker compose up -d --build
 ```
 
-## 3. Configure the current BicycleOBU test device
+The service uses `restart: unless-stopped`, so Docker starts it again after an Ubuntu reboot or container failure.
 
-The current TTS application is `bicycleobu` and the current end-device ID is `bicycleobu`. Use a stable, globally distinctive OpenTrafficMap node ID; the example below derives it from the current DevEUI without exposing any root key.
+Useful operations:
 
-```powershell
-$env:TTS_MQTT_HOST = 'eu1.cloud.thethings.network'
-$env:TTS_MQTT_USERNAME = 'bicycleobu@ttn'
-$env:TTS_APPLICATION_UID = 'bicycleobu@ttn'
-$env:TTS_MQTT_PASSWORD = '<TTS application API key>'
-$env:LORAWAN_DEVICE_ID = 'bicycleobu'
-$env:LORAWAN_FRAME_FPORT = '10'
-
-$env:OTM_NODE_ID = 'bicycleobu-70b3d57ed0078c82'
+```bash
+docker compose ps
+docker compose logs -f --tail=100
+docker compose restart
+docker compose up -d --build    # after pulling bridge updates
+docker compose down             # intentionally stop/remove it
 ```
 
-OpenTrafficMap publishing currently uses TLS on `cits1.opentrafficmap.org:8883` and does not require a username/password. Node registration is optional for packet ingestion; use the OpenTrafficMap node-registration/self-service process if a friendly receiver name, map-visible receiver location, or subscriber credentials are wanted.
-
-Optional metadata overrides:
-
-```powershell
-$env:OTM_VERSION = 'MainboardOBU-prototype/lorawan-otm-bridge'
-$env:OTM_HW_VARIANT = 'xiao-esp32s3+wio-sx1262'
-```
-
-Do not invent an Ethernet MAC for `OTM_EMAC`. Set it only if a real MAC is intentionally associated with this OTM node.
-
-## 4. Run
-
-```powershell
-python bridge.py
-```
-
-Expected startup:
+Expected startup log:
 
 ```text
 connected to OpenTrafficMap MQTT at cits1.opentrafficmap.org:8883
 connected to The Things Stack MQTT; subscribing to v3/bicycleobu@ttn/devices/bicycleobu/up
 ```
 
-When all fragments of one C5 frame arrive:
+The image is based on `python:3.13-alpine`, installs only `paho-mqtt`, runs as a non-root user, uses a read-only root filesystem under Compose, drops Linux capabilities and needs no exposed ports.
+
+## TTS API key
+
+In The Things Stack Console, open application `bicycleobu` and create an application API key with permission to read application traffic. Use the generated key only as `TTS_MQTT_PASSWORD` in the local `.env` file.
+
+For the TTN Sandbox tenant, the application MQTT identity/topic prefix includes `@ttn`:
+
+```text
+bicycleobu@ttn
+```
+
+The bridge subscribes to the exact current device topic when `LORAWAN_DEVICE_ID` is configured:
+
+```text
+v3/bicycleobu@ttn/devices/bicycleobu/up
+```
+
+## OpenTrafficMap side
+
+The bridge publishes with TLS to:
+
+```text
+cits1.opentrafficmap.org:8883
+```
+
+Packet ingestion does not require publisher username/password. The topics are:
+
+```text
+its/<node-id>/status
+its/<node-id>/info
+its/<node-id>/packet
+```
+
+`packet` contains the reconstructed original C5 frame. Use a stable node ID. Do not invent an Ethernet MAC merely to populate metadata.
+
+## Local development without Docker
+
+Windows example:
+
+```powershell
+cd tools\lorawan_otm_bridge
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+
+$env:TTS_MQTT_HOST = 'eu1.cloud.thethings.network'
+$env:TTS_MQTT_USERNAME = 'bicycleobu@ttn'
+$env:TTS_APPLICATION_UID = 'bicycleobu@ttn'
+$env:TTS_MQTT_PASSWORD = '<TTS application API key>'
+$env:LORAWAN_DEVICE_ID = 'bicycleobu'
+$env:LORAWAN_FRAME_FPORT = '10'
+$env:OTM_NODE_ID = 'bicycleobu-70b3d57ed0078c82'
+
+python bridge.py
+```
+
+## End-to-end check
+
+1. Keep the S3 session/NVS intact; normal `flash` is fine, routine `erase-flash` is not.
+2. Confirm the bridge is connected to both MQTT brokers.
+3. Receive a real ITS-G5 frame on the C5.
+4. Confirm the S3 reports `C5 V2X RX` and a LoRaWAN fragment/application uplink.
+5. Confirm TTS application Live Data shows FPort 10.
+6. Wait until every fragment of one frame arrives.
+7. Confirm the bridge logs:
 
 ```text
 published C-ITS frame to OpenTrafficMap: device=bicycleobu bytes=<n> topic=its/bicycleobu-70b3d57ed0078c82/packet
 ```
 
-One received ITS-G5 frame usually spans multiple LoRaWAN uplinks, so seeing an individual TTS uplink does not imply an immediate OTM publish.
+8. Check OpenTrafficMap for the decoded traffic represented by that frame.
 
-## 5. End-to-end check
+One ITS-G5 frame normally spans multiple LoRaWAN uplinks. The bridge intentionally stays silent at INFO level for incomplete frames and publishes only after length and whole-frame CRC verification.
 
-1. Keep the S3 session/NVS intact; normal `flash` is fine, `erase-flash` is not.
-2. Start this bridge and confirm both MQTT connections.
-3. Put the C5 where it receives ITS-G5 traffic.
-4. Confirm the S3 log reports C5 RX frames and LoRaWAN fragments/application uplinks.
-5. Confirm TTS application Live Data shows FPort 10 uplinks.
-6. Confirm the bridge logs one completed `published C-ITS frame` line.
-7. Check OpenTrafficMap for the decoded traffic represented by those frames. A node does not have to be registered for ingestion, but registration/friendly naming makes receiver attribution and map placement easier.
+### If TTS Live Data is empty
 
-If TTS receives no FPort 10 application uplinks, debug the LoRaWAN/application path first. If TTS receives all fragments but the bridge does not publish, run with `$env:LOG_LEVEL='DEBUG'` and check FPort/device filtering and reassembly errors. If the bridge publishes successfully but nothing is rendered by OTM, verify that the C5 payload is a valid raw ITS-G5/802.11p frame and that the OTM node/topic is correct.
+The bridge cannot receive anything until TTS receives an application uplink. Check the radio path first. A local RadioLib line such as `Uplink sent` only proves that the SX1262 completed its own transmit operation; it does not prove that a gateway heard the packet.
+
+For the current DR0/SF12 diagnostic session, a 44-byte LoRaWAN fragment can occupy several seconds of airtime and RadioLib may then wait several minutes for legal duty-cycle availability. This is expected and also means a complete 10-fragment C-ITS frame can take a long time at DR0.
+
+If the S3 reports a fragment as sent but TTS remains empty, move close to a known online TTN V3 gateway or use a controlled local gateway before changing the bridge. Once TTS receives FPort-10 uplinks, use `docker compose logs -f` to distinguish TTS/MQTT filtering from fragment-reassembly problems.
