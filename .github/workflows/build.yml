@@ -16,10 +16,10 @@ jobs:
 
   build-c5:
     runs-on: ubuntu-latest
-    container: espressif/idf:release-v6.1
+    container: espressif/idf:v6.0.2
     steps:
       - uses: actions/checkout@v4
-      - name: Verify ESP-IDF 6.1
+      - name: Verify ESP-IDF 6.0.2
         shell: bash
         run: |
           . "$IDF_PATH/export.sh"
@@ -33,10 +33,10 @@ jobs:
 
   build-c5-tx:
     runs-on: ubuntu-latest
-    container: espressif/idf:release-v6.1
+    container: espressif/idf:v6.0.2
     steps:
       - uses: actions/checkout@v4
-      - name: Verify ESP-IDF 6.1
+      - name: Verify ESP-IDF 6.0.2
         shell: bash
         run: |
           . "$IDF_PATH/export.sh"
@@ -59,10 +59,10 @@ jobs:
 
   build-s3:
     runs-on: ubuntu-latest
-    container: espressif/idf:release-v6.1
+    container: espressif/idf:v6.0.2
     steps:
       - uses: actions/checkout@v4
-      - name: Verify ESP-IDF 6.1
+      - name: Verify ESP-IDF 6.0.2
         shell: bash
         run: |
           . "$IDF_PATH/export.sh"
