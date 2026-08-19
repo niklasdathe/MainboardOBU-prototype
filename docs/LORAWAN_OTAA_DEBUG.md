@@ -35,7 +35,7 @@ DevEUI:  70B3D57ED0078C82
 
 The firmware menuconfig and the on-air JoinRequest contain the same values. Root keys are intentionally not copied into repository documentation. TTS accepted the JoinRequest, which independently proves the configured root keys for this capture are valid.
 
-### RadioLib dependency
+### RadioLib dependency / toolchain
 
 The repository and physical build now use the intended RadioLib PR #1811 merge commit:
 
@@ -49,7 +49,7 @@ The local build explicitly resolves this commit and RadioLib reports:
 Platform: "ESP-IDF"
 ```
 
-The earlier stale `dependencies.lock` problem with `f0fb0295...` is resolved. The current physical build still uses ESP-IDF 6.0.2; CI/reference uses ESP-IDF 6.1.
+The earlier stale `dependencies.lock` problem with `f0fb0295...` is resolved. The project standard is ESP-IDF 6.0.2, and the physical capture shown below also uses ESP-IDF 6.0.2. The LoRaWAN branch workflow has been aligned to `espressif/idf:v6.0.2` so the branch and base CI no longer disagree on the intended toolchain.
 
 ## Latest decisive DR0 / TTS capture
 
@@ -134,6 +134,7 @@ See [`evidence/LORAWAN_OTAA_2026-08-19_dr0_packetbroker_join_accepted_no_schedul
 8. **Frequency-plan alignment:** diagnostic TTS device uses SF12 for RX2, matching RadioLib pre-join EU868 RX2 of 869.525 MHz / DR0.
 9. **Configurable initial JoinRequest DR:** `Initial OTAA uplink data rate (EU868 DR0..DR5)` added under `Activation and network`; DR0/SF12 was successfully observed by TTS.
 10. **Current device identity/root keys revalidated:** a freshly created diagnostic registration with new JoinEUI/DevEUI was accepted by TTS at DevNonce 0.
+11. **ESP-IDF version aligned:** all branch firmware CI jobs now use ESP-IDF 6.0.2, matching the project-wide toolchain and current physical test environment.
 
 ## Current hypotheses and discriminating tests
 
@@ -170,12 +171,6 @@ Then:
 3. compare TTS downlink frequency/data rate/timestamp with RadioLib RX1/RX2;
 4. inspect SX1262 IRQ setup and SetRx sequence.
 
-### C. Toolchain mismatch
-
-**Status: secondary.**
-
-RadioLib dependency mismatch is resolved. Physical testing still uses ESP-IDF 6.0.2 while CI/reference is 6.1. Repeat the final controlled comparison under 6.1, but do not attribute the missing server scheduling events to device RX timing.
-
 ## Next test sequence
 
 1. Do **not** erase flash again; preserve the current nonce state.
@@ -186,7 +181,6 @@ RadioLib dependency mismatch is resolved. Physical testing still uses ESP-IDF 6.
 6. If `ns.down.join.schedule.success` and `gs.down.tx.success` appear but the device still returns `-1116`, perform one full SPI + RXEN diagnostic capture.
 7. If the device joins, verify an application uplink, then hard-power-cycle and confirm NVS session restoration.
 8. Finally test C5 raw V2X frame -> S3 -> LoRaWAN -> TTS -> reassembly bridge -> OpenTrafficMap.
-9. Repeat the final validated path under ESP-IDF 6.1 to match CI/reference.
 
 ## Evidence files
 
@@ -212,7 +206,7 @@ RadioLib dependency mismatch is resolved. Physical testing still uses ESP-IDF 6.
 Do not close this investigation merely because `js.join.accept` appears. Close only after:
 
 1. firmware identity exactly matches the TTS device;
-2. intended RadioLib dependency and reference toolchain are used;
+2. intended RadioLib dependency and ESP-IDF 6.0.2 toolchain are used;
 3. TTS receives a JoinRequest and a gateway schedules/transmits a JoinAccept;
 4. RadioLib reports a new/restored LoRaWAN session;
 5. the S3 sends an application uplink;
