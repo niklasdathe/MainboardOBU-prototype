@@ -52,6 +52,9 @@ typedef struct {
     uint32_t join_attempts;
     uint32_t join_failures;
     bool joined;
+    bool link_metrics_valid;
+    float last_downlink_rssi_dbm;
+    float last_downlink_snr_db;
 } obu_lorawan_stats_t;
 
 /**
