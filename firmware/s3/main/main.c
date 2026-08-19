@@ -198,10 +198,14 @@ static void mark_c5_message(const obu_ipc_message_t *m)
 
 static void update_v2x_hmi_and_geiger(const uint8_t *frame, size_t frame_len)
 {
-    obu_v2x_frame_info_t info;
-    if (!obu_v2x_classify_80211_frame(frame, frame_len, &info)) return;
-
     hmi.v2x_rx_seen = true;
+
+    obu_v2x_frame_info_t info;
+    if (!obu_v2x_classify_80211_frame(frame, frame_len, &info)) {
+        snprintf(hmi.v2x_rx_type, sizeof(hmi.v2x_rx_type), "RAW");
+        return;
+    }
+
     if (info.kind == OBU_V2X_FRAME_FACILITIES) {
         snprintf(hmi.v2x_rx_type, sizeof(hmi.v2x_rx_type), "%s",
                  obu_v2x_message_type_name(info.message_id));
@@ -254,9 +258,12 @@ static void ingest_ipc(const obu_ipc_message_t *m)
             return;
         }
 
+        c5_rx_frame_count++;
+        hmi.v2x_rx_count = c5_rx_frame_count;
+        hmi.v2x_last_rssi_dbm = w.meta.rssi_dbm;
+        hmi.v2x_last_frequency_mhz = w.meta.frequency_mhz;
         update_v2x_hmi_and_geiger(frame, w.frame_len);
 
-        c5_rx_frame_count++;
         if (c5_rx_frame_count == 1u || (c5_rx_frame_count % 100u) == 0u) {
             ESP_LOGI(TAG,
                      "C5 V2X RX #%u: c5_seq=%u len=%u freq=%uMHz rssi=%ddBm hw_ts=%llu us",
@@ -368,7 +375,10 @@ static void ingest_ipc(const obu_ipc_message_t *m)
 static void monitor_c5_link(void)
 {
     const uint64_t now = obu_monotonic_us();
+    hmi.c5_message_count = c5_message_count;
+
     if (c5_last_message_us == 0) {
+        hmi.c5_last_age_ms = 0xffffffffU;
         if (now > 3000000ULL && (c5_last_link_report_us == 0 || now - c5_last_link_report_us >= 5000000ULL)) {
             c5_last_link_report_us = now;
             ESP_LOGW(TAG,
@@ -378,6 +388,9 @@ static void monitor_c5_link(void)
     }
 
     const uint64_t age_us = now - c5_last_message_us;
+    const uint64_t age_ms = age_us / 1000ULL;
+    hmi.c5_last_age_ms = age_ms > 0xfffffffeULL ? 0xfffffffeU : (uint32_t)age_ms;
+
     if (age_us > 3000000ULL && c5_link_online) {
         c5_link_online = false;
         hmi.c5_online = false;
@@ -458,6 +471,21 @@ static void hmi_task(void *arg)
 {
     (void)arg;
     for (;;) {
+#ifdef CONFIG_OBU_LORAWAN_ENABLE
+        if (lorawan != NULL) {
+            obu_lorawan_stats_t stats;
+            obu_lorawan_get_stats(lorawan, &stats);
+            hmi.lorawan_ready = true;
+            hmi.lorawan_joined = stats.joined;
+            hmi.lorawan_signal_valid = stats.link_metrics_valid;
+            hmi.lorawan_last_rssi_dbm = stats.last_downlink_rssi_dbm;
+            hmi.lorawan_last_snr_db = stats.last_downlink_snr_db;
+            hmi.lorawan_frames_sent = stats.frames_sent;
+            hmi.lorawan_tx_errors = stats.tx_errors;
+            hmi.lorawan_join_attempts = stats.join_attempts;
+            hmi.lorawan_join_failures = stats.join_failures;
+        }
+#endif
         if (display.ops != NULL && display.ops->render != NULL) (void)display.ops->render(&display, &hmi);
         vTaskDelay(pdMS_TO_TICKS(200));
     }
@@ -628,6 +656,7 @@ void app_main(void)
     if (obu_diag_logger_start(&lc, &logger) != ESP_OK) ESP_LOGW(TAG, "SD diagnostic log unavailable");
 
 #ifdef CONFIG_OBU_LORAWAN_ENABLE
+    hmi.lorawan_enabled = true;
     const obu_lorawan_config_t lorawan_config = {
         .enabled = true,
         .host = SPI2_HOST,
@@ -651,6 +680,7 @@ void app_main(void)
         .join_retry_ms = CONFIG_OBU_LORAWAN_JOIN_RETRY_MS,
     };
     const esp_err_t lorawan_err = obu_lorawan_start(&lorawan_config, &lorawan);
+    hmi.lorawan_ready = lorawan_err == ESP_OK && lorawan != NULL;
     if (lorawan_err != ESP_OK) {
         ESP_LOGW(TAG, "Wio-SX1262 LoRaWAN uplink unavailable; acquisition continues: %s",
                  esp_err_to_name(lorawan_err));
