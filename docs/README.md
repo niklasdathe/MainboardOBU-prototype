@@ -1,6 +1,6 @@
 # Documentation
 
-Start with the row that matches the job in front of you. The root README is the project overview; this directory holds the engineering detail and verification boundaries.
+Use the document that matches the task; keep detailed terminal captures out of the repository once their conclusions have been consolidated.
 
 ## Task guides
 
@@ -9,9 +9,11 @@ Start with the row that matches the job in front of you. The root README is the 
 | Understand the C5/S3 responsibility split and event flow | [`ARCHITECTURE.md`](ARCHITECTURE.md) |
 | Wire or change prototype hardware | [`HARDWARE.md`](HARDWARE.md) |
 | Build both targets and interpret CI | [`DEVELOPMENT.md`](DEVELOPMENT.md) |
-| Configure the Wio-SX1262 LoRaWAN -> OpenTrafficMap path | [`LORAWAN_OTM.md`](LORAWAN_OTM.md) |
-| Diagnose OTAA / JoinAccept / `-1116` behavior | [`LORAWAN_OTAA_DEBUG.md`](LORAWAN_OTAA_DEBUG.md) |
+| Configure and run Wio-SX1262 LoRaWAN -> OpenTrafficMap | [`LORAWAN_OTM.md`](LORAWAN_OTM.md) |
+| Diagnose OTAA / JoinAccept behavior | [`LORAWAN_OTAA_DEBUG.md`](LORAWAN_OTAA_DEBUG.md) |
 | Check whether a workbook requirement is implemented or still awaiting evidence | [`REQUIREMENT_TRACEABILITY.md`](REQUIREMENT_TRACEABILITY.md) |
+
+The executable TTS -> OpenTrafficMap bridge has its own short operator guide at [`../tools/lorawan_otm_bridge/README.md`](../tools/lorawan_otm_bridge/README.md).
 
 ## Engineering references
 
@@ -34,7 +36,7 @@ Start with the row that matches the job in front of you. The root README is the 
 | ESP-IDF compiler gate for C5 and S3 | `.github/workflows/build.yml` |
 | Hardware profiles | `config/hardware/*.yaml` |
 | Pin-conflict validation | `scripts/check_pin_plan.py` |
-| LoRaWAN OTAA investigation record | `LORAWAN_OTAA_DEBUG.md` |
+| LoRaWAN OTAA conclusions | `LORAWAN_OTAA_DEBUG.md` |
 | Requirement implementation state | `REQUIREMENT_TRACEABILITY.md` |
 
 ## Information ownership
@@ -42,5 +44,5 @@ Start with the row that matches the job in front of you. The root README is the 
 - The requirement workbook in the parent BicycleOBU project governs system acceptance.
 - YAML hardware profiles own prototype pin/resource assignments.
 - Public component headers own reusable software contracts; applications should not bypass them to depend on a particular peripheral driver.
-- `LORAWAN_OTAA_DEBUG.md` owns the running history and evidence for the current JoinAccept investigation; update it instead of scattering contradictory troubleshooting notes across issues or chats.
+- `LORAWAN_OTM.md` owns the operational LoRaWAN/OpenTrafficMap path; `LORAWAN_OTAA_DEBUG.md` contains only reusable activation troubleshooting conclusions.
 - `REQUIREMENT_TRACEABILITY.md` distinguishes implemented software from tests that still require real hardware/RF evidence.
