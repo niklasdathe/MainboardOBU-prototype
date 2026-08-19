@@ -93,6 +93,18 @@ config OBU_LORAWAN_APP_KEY
     string "AppKey (32 hex digits)"
     default ""
 
+config OBU_LORAWAN_JOIN_DATARATE
+    int "Initial OTAA uplink data rate (EU868 DR0..DR5)"
+    range 0 5
+    default 3
+    help
+        Select the data rate used for JoinRequest uplinks before the network
+        can control the link through ADR. EU868 mapping is DR0=SF12, DR1=SF11,
+        DR2=SF10, DR3=SF9, DR4=SF8 and DR5=SF7, all at 125 kHz. DR3 preserves
+        the previous BicycleOBU behavior. For coverage diagnostics, DR0 gives
+        the largest link budget at the cost of substantially more airtime.
+        ADR remains enabled for normal operation after activation.
+
 endmenu
 
 menu "Payload and buffering"
