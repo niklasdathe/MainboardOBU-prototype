@@ -1,378 +1,219 @@
-# LoRaWAN uplink to OpenTrafficMap
+# LoRaWAN -> OpenTrafficMap
 
-This document describes the BicycleOBU prototype path from the S3/Wio-SX1262 through The Things Network / The Things Stack to the server-side OpenTrafficMap bridge.
-
-For the running OTAA failure investigation and dated hardware evidence, see [`LORAWAN_OTAA_DEBUG.md`](LORAWAN_OTAA_DEBUG.md) and [`evidence/`](evidence/).
-
-## Architecture
+This is the operational path for forwarding ITS-G5 frames received by the C5 to OpenTrafficMap through the optional Wio-SX1262 module.
 
 ```text
-C5 ITS-G5 receiver
-        |
-        | raw C-ITS frame over S3<->C5 SPI IPC
-        v
-ESP32-S3
-        |
-        | bounded/versioned binary fragments
-        v
-Wio-SX1262 / EU868 LoRaWAN
-        |
-        v
-LoRaWAN gateway
-        |
-        v
-The Things Stack
-        |
-        | application MQTT uplinks
-        v
-lorawan_otm_bridge
-        |
-        | reconstructed original binary frame
-        v
-OpenTrafficMap MQTT
+ITS-G5 air
+  -> ESP32-C5 raw RX frame
+  -> S3 SPI IPC
+  -> bounded LoRaWAN fragment queue
+  -> Wio-SX1262 / EU868
+  -> any usable LoRaWAN gateway
+  -> The Things Stack
+  -> tools/lorawan_otm_bridge
+  -> mqtts://cits1.opentrafficmap.org:8883
+  -> its/<node-id>/packet
 ```
 
-The bridge publishes the exact reconstructed raw C-ITS frame bytes. It does not convert the ITS packet to JSON.
+The bridge reconstructs the original raw frame and publishes it as binary. It does not convert the C-ITS packet to JSON or invent missing data.
 
-## 1. Checkout and toolchain
+## Current verified state
 
-Use the feature branch while the LoRaWAN implementation is still under physical validation:
-
-```powershell
-git fetch origin
-git switch agent/lorawan-otm-uplink
-git pull --ff-only
-git status
-git rev-parse HEAD
-```
-
-Use ESP-IDF 6.1 for reference builds because CI uses 6.1. ESP-IDF 6.0.2 has also compiled locally, but physical comparison results should note the toolchain explicitly.
-
-Do not commit real LoRaWAN root keys in `sdkconfig.defaults`, shell scripts or Git history.
-
-## 2. Create a The Things Stack application
-
-For Germany/EU868 the reference setup uses The Things Network / The Things Stack Sandbox EU1 cluster.
-
-Create an application, for example:
+Physical testing has demonstrated a valid LoRaWAN session being persisted and restored after a normal firmware reflash:
 
 ```text
-Application ID: bicycleobu
-Name: BicycleOBU
+nonce_state=present session_state=present
+session_restored=yes
+RADIOLIB_LORAWAN_SESSION_RESTORED (-1117)
+activated=yes
 ```
 
-For the TTN tenant the MQTT application UID/username is normally:
+The remaining end-to-end work is therefore application traffic: receive a real C5 frame, carry all of its fragments through TTS, reassemble it in the bridge and observe the resulting raw packet on OpenTrafficMap.
 
-```text
-bicycleobu@ttn
-```
+See [`LORAWAN_OTAA_DEBUG.md`](LORAWAN_OTAA_DEBUG.md) only if activation stops working again.
 
-Use the actual Application ID if it differs.
+## Firmware configuration
 
-## 3. Register the end device
-
-Use the manual end-device registration path.
-
-The current BicycleOBU diagnostic/reference profile is:
-
-```text
-Frequency plan: Europe 863-870 MHz (SF12 for RX2)
-LoRaWAN MAC version: 1.1.0
-Regional Parameters: RP002 1.0.4
-Activation: OTAA
-```
-
-The SF12-for-RX2 plan matches RadioLib's observed EU868 pre-join RX2 default:
-
-```text
-869.525 MHz / DR0 / SF12 / BW125
-```
-
-The firmware uses both `NwkKey` and `AppKey`, so register it as LoRaWAN 1.1 rather than a LoRaWAN 1.0.x-only device.
-
-Map the fields as follows:
-
-| Firmware field | TTS field | Length |
-|---|---|---:|
-| `OBU_LORAWAN_JOIN_EUI` | JoinEUI | 16 hex digits |
-| `OBU_LORAWAN_DEV_EUI` | DevEUI | 16 hex digits |
-| `OBU_LORAWAN_NWK_KEY` | NwkKey | 32 hex digits |
-| `OBU_LORAWAN_APP_KEY` | AppKey | 32 hex digits |
-
-For this programmable prototype, an all-zero JoinEUI is used as long as the exact same value is configured on both sides.
-
-Suggested End Device ID:
-
-```text
-bicycleobu-mainboard
-```
-
-Root keys are secrets. Do not copy them into issue/PR text, committed config or debug logs.
-
-## 4. Gateway requirement
-
-A real EU868 LoRaWAN gateway must be in range. Public TTN community coverage can work, but it is not a deterministic test setup.
-
-`RLB_PRO: Uplink sent` means only that the local SX1262 completed the transmit operation. It is **not** acknowledgement that a gateway heard the frame.
-
-When TTS Live Data is completely empty during a local JoinRequest, verify in this order:
-
-1. JoinEUI/DevEUI match the current registered device exactly;
-2. the JoinRequest uses EU868 default channels;
-3. the antenna/IPEX connection is secure and the antenna is suitable for 868 MHz;
-4. an active gateway is actually in range;
-5. for controlled debugging, move close to a known gateway or use a local multi-channel EU868 gateway.
-
-Historical BicycleOBU tests did reach public TTN gateways, but current gateway availability must be proven again whenever Live Data is empty.
-
-## 5. Configure the S3
-
-Run:
-
-```powershell
-idf.py -C firmware/s3 set-target esp32s3
-idf.py -C firmware/s3 menuconfig
-```
-
-Open:
-
-```text
-BicycleOBU prototype
-  -> LoRaWAN uplink
-```
-
-Settings are grouped into:
-
-```text
-Activation and network
-Payload and buffering
-Airtime and retry scheduling
-Diagnostics
-```
-
-### Initial OTAA JoinRequest data rate
-
-`Activation and network` contains:
-
-```text
-Initial OTAA uplink data rate (EU868 DR0..DR5)
-```
-
-Mapping:
-
-```text
-DR0 = SF12 / BW125
-DR1 = SF11 / BW125
-DR2 = SF10 / BW125
-DR3 = SF9  / BW125
-DR4 = SF8  / BW125
-DR5 = SF7  / BW125
-```
-
-Default is **DR3**, preserving the original BicycleOBU behavior. The setting affects the pre-activation JoinRequest uplink. ADR is temporarily disabled while RadioLib applies the configured data rate and is enabled again for normal network-controlled operation. A restored valid session is not overwritten by this setting.
-
-For a coverage diagnostic when TTS sees no JoinRequest at DR3, try **DR0**. DR0 provides the strongest link budget at the cost of substantially greater airtime; it is a diagnostic tool, not a reason to bypass normal duty-cycle handling.
-
-The Wio-SX1262 hardware profile is:
-
-```text
-SCK    GPIO7
-MISO   GPIO8
-MOSI   GPIO9
-NSS    GPIO41
-DIO1   GPIO39
-RESET  GPIO42
-BUSY   GPIO40
-RXEN   GPIO38
-TXEN   NC
-DIO2   internal RF switch control
-DIO3   TCXO at 1.8 V
-```
-
-With the Wio fitted, GNSS PPS must not use GPIO41. The prototype moves PPS to GPIO47.
-
-## 6. RadioLib dependency
-
-The current manifest requests RadioLib commit:
-
-```text
-12e3ed6c4814e177a87a7b2c48ab11dd65788143
-```
-
-This is the merged state of RadioLib PR #1811, which contains the SX126x LoRaWAN receive-window symbol-timeout work used in the OTAA investigation.
-
-ESP-IDF Component Manager may keep an older exact selection in `firmware/s3/dependencies.lock`. After changing the manifest pin, run:
+Build with ESP-IDF 6.0.2 and the pinned RadioLib dependency. If the manifest pin has changed locally, refresh the component lock first:
 
 ```powershell
 idf.py -C firmware/s3 update-dependencies
 idf.py -C firmware/s3 reconfigure
 ```
 
-A physical test intended to use the merge commit must explicitly show:
+The build must resolve:
 
 ```text
 RadioLib (12e3ed6c4814e177a87a7b2c48ab11dd65788143)
-```
-
-The native merged ESP-IDF HAL also reports:
-
-```text
 Platform: "ESP-IDF"
 ```
 
-Do not infer the selected RadioLib source from the manifest alone.
-
-## 7. Build and flash
-
-Build:
-
-```powershell
-idf.py -C firmware/s3 build
-```
-
-Flash and monitor:
-
-```powershell
-idf.py -C firmware/s3 -p COMx flash monitor
-```
-
-Replace `COMx` with the current Windows port.
-
-### Do not erase NVS during normal updates
-
-The LoRaWAN component persists RadioLib nonce/session buffers in the default NVS partition under namespace:
-
-```text
-obu_lwan
-```
-
-Ordinary `flash` preserves this state. `erase-flash` destroys it.
-
-If JoinEUI/DevEUI/root keys are intentionally changed, RadioLib may reject the old buffer with:
-
-```text
-RADIOLIB_ERR_NONCES_DISCARDED (-1119)
-```
-
-That is intentional fail-closed behavior. Only erase local state when the matching development end-device state in TTS is deliberately reprovisioned/synchronized as well.
-
-Changing only the diagnostic initial JoinRequest data rate does not change the OTAA identity/root credentials and does not justify erasing NVS.
-
-## 8. OTAA diagnostic mode
-
-Navigate to:
+Configure under:
 
 ```text
 BicycleOBU prototype
   -> LoRaWAN uplink
-     -> Diagnostics
 ```
 
-Recommended first diagnostic capture:
+The menu is grouped into activation/network, payload/buffering, airtime/retries and diagnostics.
+
+Current development profile:
 
 ```text
-[x] Enable structured LoRaWAN ESP_LOG diagnostics
-[x] Enable RadioLib basic + protocol trace
-[ ] Enable RadioLib full SPI trace
+Region:      EU868
+LoRaWAN:     1.1 OTAA
+JoinEUI:     1111111111111111
+DevEUI:      70B3D57ED0078C82
+TTS plan:    Europe 863-870 MHz (SF12 for RX2)
+TTS RP:      RP002 1.0.4
+FPort:       10
 ```
 
-The structured log includes radio control-line snapshots, activation duration, duty-cycle timing, configured join data rate, public EUIs, persistence state and human-readable RadioLib errors. Root keys are never intentionally logged.
+Root keys are secrets and must match TTS exactly; do not commit them.
 
-Use full SPI trace only for one short attempt after TTS proves a JoinAccept was actually transmitted and the device still misses it.
+DR0/SF12 is currently useful for the controlled coverage test. The initial join DR is configurable from DR0..DR5, while ADR is enabled for the active session.
 
-For `-1116`, do not assume an RX failure until the same JoinRequest appears in TTS. The useful server-side sequence is:
+### Hardware pins
 
 ```text
-ns.up.join.process
-js.join.accept
-ns.down.join.schedule.attempt
-ns.down.join.schedule.success | ns.down.join.schedule.fail
-gs.down.send
-gs.down.tx.success | gs.down.tx.fail
+SCK     GPIO7
+MISO    GPIO8
+MOSI    GPIO9
+NSS     GPIO41
+DIO1    GPIO39
+RESET   GPIO42
+BUSY    GPIO40
+RXEN    GPIO38
+TXEN    NC
+DIO2    radio RF switch
+DIO3    TCXO 1.8 V
+GNSS PPS GPIO47
 ```
 
-If TTS Live Data is empty at DR3, a useful next controlled test is DR0/SF12 near a known active gateway. Verify the local `RLB_PRO` trace actually changes the JoinRequest to SF12 before interpreting the result.
+## What is sent over LoRaWAN
 
-## 9. Persistent activation acceptance test
+When the S3 receives `OBU_IPC_RX_FRAME` from the C5, it enqueues the raw frame before the local event-bus size conversion. The queue is bounded and non-blocking so a slow LoRaWAN link cannot stall C5 acquisition.
 
-After a successful OTAA join/application uplink, fully power-cycle the board without reflashing.
-
-Expected persistence startup is approximately:
+One raw frame is split into versioned binary fragments. Each fragment contains:
 
 ```text
-LoRaWAN NVS ready: nonce_state=present session_state=present
-RadioLib persistence attached: nonce_state=restored session_restored=yes
+magic/version/flags
+frame sequence
+fragment index/count
+original total length
+whole-frame CRC16-CCITT
+fragment data
 ```
 
-The next application uplink must continue with valid session/frame-counter state. A reset must not cause unsafe nonce/counter reuse.
+The default fragment data size is 32 bytes and the application FPort is 10. Multiple LoRaWAN uplinks are therefore normally required for one ITS-G5 frame.
 
-## 10. TTS MQTT integration
+## The Things Stack MQTT
 
-Create an application API key that can read application traffic and configure the bridge with the TTS MQTT details shown by the Console.
-
-Typical EU1 values are:
+The current application is:
 
 ```text
-TTS_MQTT_HOST=eu1.cloud.thethings.network
-TTS_MQTT_USERNAME=<application-id>@ttn
-TTS_APPLICATION_UID=<application-id>@ttn
-LORAWAN_DEVICE_ID=bicycleobu-mainboard
-LORAWAN_FRAME_FPORT=10
+Application ID: bicycleobu
+Device ID:      bicycleobu
+Cluster:        eu1.cloud.thethings.network
 ```
 
-`TTS_MQTT_PASSWORD` is the generated TTS API key and must be treated as a secret.
+Create an application API key in the TTS Console with permission to read application traffic. The API key is the MQTT password.
 
-The bridge subscribes to:
+For The Things Network tenant, use:
 
 ```text
-v3/<TTS_APPLICATION_UID>/devices/+/up
+MQTT host:      eu1.cloud.thethings.network
+MQTT port:      8883
+Username:       bicycleobu@ttn
+Application UID bicycleobu@ttn
+Uplink topic:   v3/bicycleobu@ttn/devices/bicycleobu/up
 ```
 
-It base64-decodes `uplink_message.frm_payload`, checks FPort, reassembles BicycleOBU fragments by device/frame sequence, verifies original length and CRC16, then publishes the reconstructed raw C-ITS frame.
+TTS application MQTT uses MQTT 3.1.1/QoS 0. The bridge reads `uplink_message.frm_payload`, base64-decodes it, filters FPort 10 and reassembles by device/frame sequence.
 
-## 11. Run the OpenTrafficMap bridge
+## OpenTrafficMap MQTT
 
-From the repository root on Windows:
+Current OpenTrafficMap receiver documentation uses:
+
+```text
+Broker: mqtts://cits1.opentrafficmap.org:8883
+Authentication for publishing: none
+```
+
+The bridge publishes:
+
+```text
+its/<node-id>/status   retained online/offline
+its/<node-id>/info     compact node/bridge metadata
+its/<node-id>/packet   raw binary ITS-G5 frame
+```
+
+OpenTrafficMap node registration is optional for packet ingestion. Registration/self-service is useful when a friendly receiver name, map location or subscriber credentials are wanted.
+
+Use a stable unique node ID. For the current development device:
+
+```text
+bicycleobu-70b3d57ed0078c82
+```
+
+Do not invent an Ethernet MAC just to fill OTM metadata.
+
+## Run the bridge on Windows
+
+The bridge has its own concise guide at [`../tools/lorawan_otm_bridge/README.md`](../tools/lorawan_otm_bridge/README.md).
+
+From the repository root:
 
 ```powershell
 cd tools\lorawan_otm_bridge
 py -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
-```
 
-Set the environment:
-
-```powershell
 $env:TTS_MQTT_HOST = 'eu1.cloud.thethings.network'
-$env:TTS_MQTT_USERNAME = '<application-id>@ttn'
-$env:TTS_MQTT_PASSWORD = '<generated TTS API key>'
-$env:TTS_APPLICATION_UID = '<application-id>@ttn'
-$env:LORAWAN_DEVICE_ID = 'bicycleobu-mainboard'
+$env:TTS_MQTT_USERNAME = 'bicycleobu@ttn'
+$env:TTS_APPLICATION_UID = 'bicycleobu@ttn'
+$env:TTS_MQTT_PASSWORD = '<TTS application API key>'
+$env:LORAWAN_DEVICE_ID = 'bicycleobu'
 $env:LORAWAN_FRAME_FPORT = '10'
-$env:OTM_NODE_ID = '<OpenTrafficMap node id>'
-```
+$env:OTM_NODE_ID = 'bicycleobu-70b3d57ed0078c82'
 
-Then run:
-
-```powershell
 python bridge.py
 ```
 
-OpenTrafficMap defaults used by the bridge are the project-documented TLS MQTT endpoint and `its/<node>/packet`/status topic structure. Reuse an existing stable OTM node ID when appropriate rather than creating a new identity on every run.
+Expected startup:
 
-One raw C-ITS frame can require multiple LoRaWAN application uplinks, so one TTS uplink does not necessarily produce one OpenTrafficMap publish.
+```text
+connected to OpenTrafficMap MQTT at cits1.opentrafficmap.org:8883
+connected to The Things Stack MQTT; subscribing to v3/bicycleobu@ttn/devices/bicycleobu/up
+```
 
-## 12. Physical end-to-end close criteria
+A completed frame produces:
 
-The LoRaWAN path is not considered complete until physical hardware demonstrates all of the following:
+```text
+published C-ITS frame to OpenTrafficMap: device=bicycleobu bytes=<n> topic=its/bicycleobu-70b3d57ed0078c82/packet
+```
 
-1. TTS receives the JoinRequest from the current registered identity.
-2. A JoinAccept is scheduled/transmitted by a gateway.
-3. RadioLib reports a new/restored valid session.
-4. The S3 sends application uplinks.
-5. A hard power-cycle restores the session safely.
-6. The bridge reconstructs the raw C-ITS frame.
-7. OpenTrafficMap receives that frame on the expected MQTT node topic.
+## End-to-end test now
 
-The current PR remains draft until those physical checks are complete.
+Do not erase the S3 flash/NVS. A normal firmware reflash preserves the current LoRaWAN session.
+
+1. Start `python bridge.py` and confirm both MQTT connections.
+2. Put the C5 where it receives actual ITS-G5 traffic.
+3. Confirm the S3 reports `C5 V2X RX` frames.
+4. Confirm TTS Live Data shows application uplinks on FPort 10.
+5. Wait for all fragments of at least one frame; DR0 can make this slow because of duty-cycle limits.
+6. Confirm the bridge logs `published C-ITS frame to OpenTrafficMap`.
+7. Check OpenTrafficMap for the decoded object/message represented by the forwarded frame.
+
+If step 3 works but step 4 does not, inspect LoRaWAN queue/session statistics. If step 4 works but step 6 does not, inspect device/FPort filtering and fragment reassembly. If step 6 works but OTM shows nothing, verify that the C5 frame is the raw ITS-G5/802.11p packet format expected by OTM and that the node/topic is correct.
+
+## Persistence rule
+
+Routine use:
+
+```powershell
+idf.py -C firmware/s3 -p COMx flash monitor
+```
+
+Do not use `erase-flash` unless the matching TTS development end-device activation state is deliberately recreated at the same time. DevNonce/session persistence is mandatory for safe OTAA operation.
