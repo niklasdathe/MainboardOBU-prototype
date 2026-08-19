@@ -1,6 +1,8 @@
 # LoRaWAN uplink to OpenTrafficMap
 
-This prototype replaces the stalled direct S3 Wi-Fi/MQTT path with a LoRaWAN transport based on the Seeed XIAO ESP32-S3 + Wio-SX1262 kit.
+This prototype replaces the parked direct S3 Wi-Fi/MQTT path with a LoRaWAN transport based on the Seeed XIAO ESP32-S3 + Wio-SX1262 kit.
+
+For the active OTAA / JoinAccept investigation, including every attempted fix and the exact next diagnostic capture, see [`LORAWAN_OTAA_DEBUG.md`](LORAWAN_OTAA_DEBUG.md).
 
 ## Architecture
 
@@ -22,7 +24,7 @@ OpenTrafficMap still receives the original raw C-ITS frame bytes. LoRaWAN is onl
 
 ## Hardware
 
-The radio component follows Seeed's XIAO ESP32-S3 + SX1262 board support values.
+The radio component follows the known XIAO ESP32-S3 + Wio-SX1262 board configuration used by current Meshtastic support and cross-checked against Seeed's module documentation.
 
 | Signal | ESP32-S3 GPIO | Notes |
 |---|---:|---|
@@ -33,26 +35,35 @@ The radio component follows Seeed's XIAO ESP32-S3 + SX1262 board support values.
 | SX1262 DIO1 | 39 | radio IRQ |
 | SX1262 RESET | 42 | radio reset |
 | SX1262 BUSY | 40 | radio busy |
-| Wio RF switch | 38 | external antenna switch control |
+| Wio RX enable | 38 | external RF switch RXEN; TXEN is NC |
+| SX1262 DIO2 | internal | module TX/RX RF-switch control |
+| SX1262 DIO3 | internal | TCXO control at 1.8 V |
 | GNSS PPS | 47 | moved from GPIO41/D12 |
 
 **Required hardware change:** do not leave the L76K PPS signal on D12/GPIO41 when the Wio-SX1262 is fitted. GPIO41 is electrically connected to SX1262 NSS. Move the PPS carrier to GPIO47. If PPS is not wired on your L76K setup, leave it disconnected rather than connecting it to GPIO41.
 
 The Wio radio shares SCK/MISO/MOSI with the C5 and microSD. Each device has its own chip select. RadioLib's native ESP-IDF HAL attaches the SX1262 as another device on the already-initialized SPI bus.
 
-The Seeed BSP configures the SX1262 TCXO supply for 3.0 V and uses GPIO38 for the board RF switch; `obu_lorawan` mirrors those values.
+The module uses two RF-control mechanisms which must not be confused:
+
+- SX1262 DIO2 controls the module's internal TX/RX switch;
+- GPIO38 is the external RX-enable line and is configured as `RXEN` with MCU `TXEN = NC`.
+
+`obu_lorawan` uses a 1.8 V DIO3 TCXO setting. The previous prototype value was 3.0 V; that was inside the Seeed module's documented TCXO range, but 1.8 V matches the known-working XIAO ESP32-S3/Wio-SX1262 board definition and removes a board-specific difference during the JoinAccept investigation.
 
 A LoRaWAN **gateway is required** between the bicycle and The Things Stack. The Wio-SX1262 end device does not provide Internet connectivity by itself. A nearby public TTN gateway is sufficient if coverage is good; for controlled testing use a real multi-channel EU868 gateway. Seeed's single-channel XIAO/Wio gateway example is useful for experiments but is not the recommended field gateway architecture.
 
 ## RadioLib pin
 
-The component uses RadioLib from commit:
+The component intentionally pins the merged RadioLib receive-window fix state:
 
 ```text
-f0fb029566c2d58a7373bb66d3a48002a5b56876
+12e3ed6c4814e177a87a7b2c48ab11dd65788143
 ```
 
-This is intentionally pinned rather than following a moving branch. It contains the SX1262 LoRaWAN Class-A receive-window timing fix used by this ESP-IDF integration. `CONFIG_FREERTOS_HZ=1000` is enabled for the RadioLib ESP-IDF timing implementation.
+This is the merge commit for RadioLib PR #1811, which addresses SX126x LoRaWAN receive-window timing/symbol-timeout behavior and was tested by its author on ESP32 + SX1262 + TTN. The merged state also carries the native ESP-IDF HAL timing changes used here. `CONFIG_FREERTOS_HZ=1000` remains enabled for deterministic timing.
+
+Do not replace this pin with the former PR-head commit `f0fb029566c2d58a7373bb66d3a48002a5b56876` merely because it was the head of #1811; the project now intentionally uses the merged state.
 
 ## Persistent LoRaWAN state
 
@@ -84,7 +95,7 @@ Normal `idf.py flash` updates do not intentionally erase the NVS partition, so L
 
 ### Important erase/reprovision rule
 
-Do **not** casually run `idf.py erase-flash` after this device has joined a LoRaWAN network. That erases the local DevNonce/session history. If you intentionally erase the S3 flash, also reprovision the end device in The Things Stack so the network and device start with a consistent activation state. Development-only server settings that permit nonce resets should not be relied on for normal operation.
+Do **not** casually run `idf.py erase-flash` after this device has joined or while OTAA nonce testing is in progress. That erases the local DevNonce/session history. If you intentionally erase the S3 flash, also reprovision/reset the corresponding development activation state in The Things Stack so network and device start consistently.
 
 ## 1. Check out the integration branch
 
@@ -158,15 +169,13 @@ Create/copy four values during device registration:
 | `OBU_LORAWAN_NWK_KEY` | NwkKey | 32 hex digits |
 | `OBU_LORAWAN_APP_KEY` | AppKey | 32 hex digits |
 
-For a programmable prototype, use EUIs/root keys generated or allocated by The Things Stack rather than inventing arbitrary identifiers. Use the Console's Generate/request functions where available and program the exact same values into the S3.
+For a programmable prototype with no manufacturer-assigned JoinEUI, all-zero JoinEUI is allowed by The Things Stack documentation as long as the same value is programmed in the device. Generate and store the root keys securely.
 
 Suggested End Device ID:
 
 ```text
 bicycleobu-mainboard
 ```
-
-Save the four OTAA values securely before leaving the registration flow.
 
 ## 4. Make sure a gateway is available
 
@@ -178,16 +187,15 @@ For your own gateway:
 2. configure the same EU868 frequency plan;
 3. wait until its status shows connected/recent traffic.
 
-If relying on community TTN coverage, the OTAA join will only work where a compatible gateway can hear the Wio-SX1262 and forward to the same network.
+If relying on community TTN coverage, the OTAA join will only work where a compatible gateway can hear the Wio-SX1262 and can also transmit the JoinAccept downlink.
 
 ## 5. Configure and flash the ESP32-S3
 
-Use an ESP-IDF 6.1 environment. On Windows, the easiest option is the ESP-IDF PowerShell/Command Prompt installed by Espressif so `idf.py` and the toolchain are already exported.
+Use ESP-IDF 6.1 to match CI exactly. A local 6.0.2 build has also compiled, but its Kconfig notes and toolchain differ from the validated CI environment.
 
 From the repository root:
 
 ```bash
-idf.py -C firmware/s3 fullclean
 idf.py -C firmware/s3 set-target esp32s3
 idf.py -C firmware/s3 menuconfig
 ```
@@ -195,33 +203,40 @@ idf.py -C firmware/s3 menuconfig
 Open:
 
 ```text
-BicycleOBU LoRaWAN uplink
+BicycleOBU prototype
+  -> LoRaWAN uplink
 ```
 
-Configure:
+The LoRaWAN settings are grouped into:
+
+```text
+Activation and network
+Payload and buffering
+Airtime and retry scheduling
+Diagnostics
+```
+
+Initial deployment settings:
 
 ```text
 Enable Wio-SX1262 LoRaWAN uplink = yes
-JoinEUI = <your 16 hex digits>
-DevEUI = <your 16 hex digits>
-NwkKey = <your 32 hex digits>
-AppKey = <your 32 hex digits>
-Raw-frame fragment FPort = 10
+Activation and network -> JoinEUI = <your 16 hex digits>
+Activation and network -> DevEUI = <your 16 hex digits>
+Activation and network -> NwkKey = <your 32 hex digits>
+Activation and network -> AppKey = <your 32 hex digits>
+Payload and buffering -> Raw-frame fragment FPort = 10
 ```
 
-Keep the default fragment size/throttling for initial testing.
+Keep the default payload/throttling values for initial testing.
 
-Build:
+Build and flash:
 
 ```bash
 idf.py -C firmware/s3 build
-```
-
-Flash and monitor. Replace `COMx` on Windows with the actual serial port; on Linux/macOS use the corresponding `/dev/...` device.
-
-```bash
 idf.py -C firmware/s3 -p COMx flash monitor
 ```
+
+Do not use `erase-flash` as part of an ordinary firmware update.
 
 On a **fresh** NVS state, expected log progression includes messages similar to:
 
@@ -243,15 +258,47 @@ Wio-SX1262 ready ... restored_session=yes
 
 A restored active session should not require a new OTAA join solely because the S3 was reset.
 
-## 6. Verify uplinks in The Things Stack before involving OpenTrafficMap
+### Diagnostic mode
 
-Open the end device's **Live data** page. Trigger an ITS-G5 frame from the C5/C5-TX setup.
+For an OTAA/downlink investigation open:
 
-You should first see the OTAA join, then application uplinks on FPort 10. The raw application payload is the BicycleOBU fragmentation protocol; do not add a TTS payload formatter for the bridge path.
+```text
+BicycleOBU prototype
+  -> LoRaWAN uplink
+     -> Diagnostics
+```
 
-If no join appears at all, debug RF/gateway coverage before debugging MQTT.
+First use:
 
-If join requests appear but are rejected, compare JoinEUI, DevEUI, NwkKey, AppKey and LoRaWAN version exactly.
+```text
+[x] Enable structured LoRaWAN ESP_LOG diagnostics
+[x] Enable RadioLib basic + protocol trace (RLB_DBG/RLB_PRO)
+[ ] Enable RadioLib full SPI trace (RLB_SPI, extremely verbose)
+```
+
+The structured diagnostics intentionally do not print root keys. RadioLib protocol tracing is a compile-time option and is enabled in the dedicated LoRaWAN CI build so that this diagnostic path cannot silently rot. Only enable full SPI tracing for a short capture when protocol tracing is insufficient.
+
+See [`LORAWAN_OTAA_DEBUG.md`](LORAWAN_OTAA_DEBUG.md) for the expected capture and decision tree.
+
+## 6. Verify OTAA and uplinks in The Things Stack before involving OpenTrafficMap
+
+Open the end device's **Live data** page.
+
+A server-side `js.join.accept` or `as.up.join.forward` proves the Join Server accepted the JoinRequest and created session material; it does **not by itself** prove that a gateway transmitted the JoinAccept over RF.
+
+For a stuck join, correlate the same uplink correlation ID with:
+
+```text
+ns.down.join.schedule.attempt
+ns.down.join.schedule.success | ns.down.join.schedule.fail
+
+gs.down.send
+gs.down.tx.success | gs.down.tx.fail
+```
+
+The Things Stack documents `ns.down.join.schedule.success` as successful scheduling of the JoinAccept on the Gateway Server. Its troubleshooting guide additionally recommends checking Gateway Server/gateway transmit events when a device is stuck in a join loop.
+
+Once OTAA succeeds, trigger an ITS-G5 frame from the C5/C5-TX setup. Application uplinks should use FPort 10. The raw application payload is the BicycleOBU fragmentation protocol; do not add a TTS payload formatter for the bridge path.
 
 ## 7. Create the TTS MQTT credential for the bridge
 
@@ -260,11 +307,9 @@ In the The Things Stack application:
 1. open **API Keys**;
 2. choose **Add API Key**;
 3. give it a name such as `bicycleobu-otm-bridge`;
-4. grant the minimum right required to **read application traffic/uplink messages**;
+4. grant the minimum right required to read application traffic/uplink messages;
 5. create the key;
-6. copy it immediately. It begins with a value similar to `NNSXS...` and is only displayed once.
-
-This application API key is the MQTT **password**.
+6. copy it immediately.
 
 For The Things Network Sandbox, the MQTT values are normally:
 
@@ -272,7 +317,7 @@ For The Things Network Sandbox, the MQTT values are normally:
 Host: eu1.cloud.thethings.network
 Port: 8883 (TLS)
 Username: <application-id>@ttn
-Password: <application API key beginning NNSXS...>
+Password: <application API key>
 ```
 
 The bridge subscribes to:
@@ -283,21 +328,17 @@ v3/<application-id>@ttn/devices/+/up
 
 ## 8. Choose an OpenTrafficMap node ID
 
-OpenTrafficMap does not currently require an MQTT username/password for publishing receiver packets. It identifies the receiver from the node portion of the topic.
-
 Choose a stable unique node ID and keep it unchanged, for example:
 
 ```text
 bicycleobu-<DevEUI>
 ```
 
-Set that exact string as `OTM_NODE_ID`. If you want the node associated with a friendly name or shown on the OpenTrafficMap map, use OpenTrafficMap's node-registration/self-service process for that same identifier where applicable.
-
-OpenTrafficMap self-service credentials, when provided, are relevant for managing/subscribing to a node; the bridge does not need them to publish.
+Set that exact string as `OTM_NODE_ID`. If you want the node associated with a friendly name or shown on the OpenTrafficMap map, use OpenTrafficMap's node-registration/self-service process for the same identifier where applicable.
 
 ## 9. Run the TTS -> OpenTrafficMap bridge
 
-The bridge can run on your development PC, Raspberry Pi, server or other always-on Internet-connected system. It is not intended to run on the bicycle S3.
+The bridge can run on a development PC, Raspberry Pi, server or other always-on Internet-connected system. It is not intended to run on the bicycle S3.
 
 Linux/macOS shell:
 
@@ -337,8 +378,6 @@ $env:LORAWAN_FRAME_FPORT = '10'
 python bridge.py
 ```
 
-Replace every example value with the values from your own TTS application/end device.
-
 Optional variables:
 
 | Variable | Default | Purpose |
@@ -363,17 +402,17 @@ published reassembled C-ITS frame: device=... bytes=... topic=its/.../packet
 Use this order so failures are isolated:
 
 1. S3 boots and reports NVS healthy.
-2. SX1262 initializes with the expected Seeed pins.
-3. TTS Live Data shows an OTAA join.
-4. TTS Live Data shows FPort 10 uplinks.
-5. Bridge reports connection to TTS MQTT.
-6. Bridge receives enough fragments to reconstruct one C-ITS frame.
-7. Bridge reports publication to `its/<OTM_NODE_ID>/packet`.
-8. OpenTrafficMap/self-service confirms the node data if the node has been registered for viewing.
+2. SX1262 initializes with the expected Wio pins, GPIO38 RXEN and 1.8 V TCXO.
+3. TTS Live Data shows a JoinRequest.
+4. TTS shows the JoinAccept scheduled/transmitted by the gateway.
+5. S3 reports a new/restored active LoRaWAN session.
+6. TTS Live Data shows FPort 10 application uplinks.
+7. Bridge connects to TTS MQTT and reconstructs one complete C-ITS frame.
+8. Bridge publishes that frame to `its/<OTM_NODE_ID>/packet`.
 9. Hard power-cycle the S3.
-10. Confirm `session_restored=yes` and send another frame without manually resetting TTS counters/nonces.
+10. Confirm `session_restored=yes` and send another frame without resetting network counters/nonces.
 
-Only after step 10 should reset/session persistence be considered hardware-validated.
+Only after step 10 should reset/session persistence and physical end-to-end operation be considered hardware-validated.
 
 ## Reprovisioning after an intentional flash erase
 
@@ -414,7 +453,7 @@ The default carries 32 raw bytes per uplink, giving a 44-byte application payloa
 
 LoRaWAN is much lower bandwidth than ITS-G5. This implementation is therefore a **best-effort collection uplink**, not a lossless mirror of every received 802.11p frame. The S3 never blocks C5 acquisition waiting for LoRa airtime. Its queue is bounded; when it fills, the oldest pending raw frame is discarded so newer traffic can still be sampled.
 
-The application adds a 10 s default spacing between fragments and leaves RadioLib duty-cycle enforcement enabled. `timeUntilUplink()` is used to wait for the legal RadioLib transmit window and retry the same fragment instead of treating duty-cycle throttling as packet loss.
+The application adds a 10 s default spacing between fragments and leaves RadioLib duty-cycle enforcement enabled. `timeUntilUplink()` is used for both OTAA and application uplinks. `RADIOLIB_ERR_UPLINK_UNAVAILABLE` is treated as a legal scheduling wait, not as an OTAA failure.
 
 Increase sampling selectivity rather than disabling regulatory duty-cycle handling.
 
@@ -422,8 +461,10 @@ The current implementation is fixed to EU868. Do not transmit with this configur
 
 ## Known prototype limitations
 
-- CI verifies compilation, pin-plan consistency and bridge reassembly tests; it cannot prove RF output, gateway coverage, OTAA acceptance, persistence across physical power loss or end-to-end OpenTrafficMap receipt.
-- Root OTAA credentials are currently configured through ESP-IDF `menuconfig`; they are not provisioned through a secure element.
+- Physical OTAA is currently under active investigation because repeated tests have reached TTS Join Server acceptance while the device still reports `RADIOLIB_ERR_NO_JOIN_ACCEPT (-1116)`. See `LORAWAN_OTAA_DEBUG.md` rather than repeating old experiments.
+- The latest captured TTS export proves Join Server acceptance but did not include the Network/Gateway Server JoinAccept scheduling/transmit events required to prove the RF downlink path.
+- CI verifies compilation, pin-plan consistency and bridge reassembly tests; it cannot prove RF output, gateway coverage, downlink reception, persistence across physical power loss or end-to-end OpenTrafficMap receipt.
+- Root OTAA credentials are configured through ESP-IDF `menuconfig`; they are not provisioned through a secure element.
 - NVS persistence uses the ESP-IDF default NVS partition. NVS encryption depends on the broader firmware/flash-security configuration and is not enabled specifically by `obu_lorawan`.
 - The uplink currently forwards raw received frames without traffic prioritization. A later collection policy should select message types or sampling rates based on research requirements and available LoRaWAN airtime.
 - The direct S3 Wi-Fi/OpenTrafficMap component remains in the repository as a parked development path and is not reused by this transport.
@@ -436,4 +477,14 @@ python -m unittest discover -s tests -v
 python -m py_compile protocol.py bridge.py
 ```
 
-GitHub Actions builds the S3 once with LoRaWAN disabled and once with `OBU_LORAWAN_ENABLE=y` using deliberately fake credentials, so the NVS-backed enabled code path is compiled without committing real secrets.
+GitHub Actions builds the S3 once with LoRaWAN disabled and once with `OBU_LORAWAN_ENABLE=y` using deliberately fake credentials. The LoRaWAN CI configuration also enables structured diagnostics and RadioLib BASIC/PROTOCOL trace at compile time so the diagnostic build path is continuously checked. Full SPI tracing remains disabled in CI.
+
+## Primary references
+
+- RadioLib issue #1806: https://github.com/jgromes/RadioLib/issues/1806
+- RadioLib PR #1811: https://github.com/jgromes/RadioLib/pull/1811
+- RadioLib debug options: https://github.com/jgromes/RadioLib/blob/master/src/BuildOpt.h
+- Meshtastic XIAO ESP32-S3/Wio-SX1262 board definition: https://github.com/meshtastic/firmware/blob/develop/variants/esp32s3/seeed_xiao_s3/variant.h
+- Seeed Wio-SX1262 module datasheet: https://files.seeedstudio.com/products/SenseCAP/Wio_SX1262/Wio-SX1262_Module_Datasheet.pdf
+- The Things Stack Events API: https://www.thethingsindustries.com/docs/api/reference/grpc/events/
+- The Things Stack device troubleshooting: https://www.thethingsindustries.com/docs/hardware/devices/troubleshooting/
