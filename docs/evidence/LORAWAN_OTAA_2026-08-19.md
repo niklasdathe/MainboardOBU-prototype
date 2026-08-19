@@ -2,6 +2,8 @@
 
 This dated evidence note belongs to the running investigation in [`../LORAWAN_OTAA_DEBUG.md`](../LORAWAN_OTAA_DEBUG.md). It records the first BicycleOBU physical capture with structured `ESP_LOG` diagnostics plus RadioLib BASIC/PROTOCOL tracing enabled.
 
+> Later evidence: this first capture used ESP-IDF 6.0.2 and predates the local dependency-lock correction. The first physical build that **actually** resolves RadioLib PR #1811 merge commit `12e3ed6c...` and reports native `Platform: "ESP-IDF"` is documented in [`LORAWAN_OTAA_2026-08-19_merged_radiolib_no_tts.md`](LORAWAN_OTAA_2026-08-19_merged_radiolib_no_tts.md). The current TTS/firmware DevEUI is also now confirmed as `70B3D57ED0078C76`; older `...8C36` evidence is historical.
+
 ## Test command and environment
 
 The S3 was flashed from the short Windows clone using:
@@ -14,7 +16,7 @@ Observed toolchain/runtime:
 
 ```text
 ESP-IDF v6.0.2
-RadioLib 7.7.1.0 source state pinned by the BicycleOBU component manifest
+RadioLib 7.7.1.0 source state selected by the then-current local dependency lock
 ESP32-S3 revision v0.2
 Wio-SX1262 on shared SPI1
 ```
@@ -36,9 +38,9 @@ RadioLib then created:
 JoinRequest (DevNonce = 0)
 ```
 
-Earlier TTS evidence for this same registered device had already shown an accepted LoRaWAN 1.1 JoinRequest with DevNonce `0x0040`. The Things Stack stores `last_dev_nonce` for LoRaWAN 1.1 devices and rejects a same-or-lower DevNonce as too small. Therefore this post-erase attempt cannot be used as clean evidence of a device RX failure unless the Join Server/device registration was also deliberately reprovisioned/reset consistently.
+Earlier TTS evidence for the then-registered device had already shown an accepted LoRaWAN 1.1 JoinRequest with a much higher DevNonce. The Things Stack tracks DevNonce for LoRaWAN 1.1 devices, so this post-erase attempt could not be treated as clean RX-failure evidence unless server/device activation state was reprovisioned consistently.
 
-Do not repeat `erase-flash` during normal OTAA debugging. If NVS is intentionally erased, reprovision the matching TTS end-device/Join Server state before the next join attempt.
+Do not repeat `erase-flash` during normal OTAA debugging. If NVS is intentionally erased, synchronize/reprovision the matching TTS end-device/Join Server state before the next join attempt.
 
 ## Radio initialization evidence
 
@@ -53,9 +55,7 @@ TCXO=1.8V
 FreeRTOS_Hz=1000
 ```
 
-RadioLib successfully read the SX126x version string and initialized the radio. The `SX1261 V2D 2D02` register string is also seen in published RadioLib SX1262 traces and is not, by itself, evidence that the board contains the wrong radio.
-
-ESP-IDF printed `SPI bus already initialized` and `GPIO isr service already installed`. The pinned RadioLib `EspHal` explicitly accepts these two conditions for a shared SPI/application-wide ISR setup; radio initialization continued successfully.
+RadioLib successfully read the SX126x version string and initialized the radio. `SPI bus already initialized` and `GPIO isr service already installed` were accepted shared-resource conditions rather than fatal initialization errors.
 
 ## JoinRequest and receive-window trace
 
@@ -94,45 +94,38 @@ elapsed=6638 ms
 activated=no
 ```
 
-The timing in this capture is internally coherent: RX1 opens approximately five seconds after the JoinRequest uplink finishes and RX2 approximately one second after RX1. The EU868 frequencies/data rates and downlink IQ inversion shown by the trace are also plausible/default LoRaWAN join-window values. This substantially narrows the device-side problem: there is no obvious gross RX1/RX2 frequency, spreading-factor, IQ or join-delay misconfiguration in this capture.
+The timing/frequency/data-rate trace is internally coherent, but this particular attempt was contaminated by the local DevNonce rollback caused by `erase-flash`. It cannot isolate the receive path.
 
-However, because NVS was erased and DevNonce rolled back to zero, this particular `-1116` must not be attributed to the RF receive path until TTS Live Data from the same correlation ID proves that the Join Server accepted DevNonce 0 and that a gateway downlink was actually scheduled/transmitted.
+## Follow-up `-1119` after reprovision/configuration change
 
-## Follow-up after device reprovision / configuration change
-
-A subsequent normal flash (without another erase) started with:
+A subsequent normal flash started with persisted local nonce state but different activation configuration and RadioLib reported:
 
 ```text
-LoRaWAN NVS ready: nonce_state=present session_state=fresh
-RLB_PRO: Configuration mismatch (key checksum: AA23E8D5, got: 0A39F08B)
+Configuration mismatch
 RadioLib rejected saved LoRaWAN state (state=-1119)
 ```
 
-RadioLib defines `-1119` as `RADIOLIB_ERR_NONCES_DISCARDED`: the persisted Nonces buffer does not match the current activation configuration. RadioLib stores an activation checksum derived from JoinEUI, DevEUI, AppKey and NwkKey in the persistence buffer and rejects the saved buffer when the current credentials do not match. This is expected when root credentials or EUIs are changed while an older nonce blob remains in NVS.
+This is `RADIOLIB_ERR_NONCES_DISCARDED`: the persisted activation checksum does not match current JoinEUI/DevEUI/root keys. BicycleOBU intentionally fails closed instead of silently resetting nonce history.
 
-BicycleOBU intentionally treats this as fail-closed. It does **not** silently discard the nonce history because doing so could cause unsafe DevNonce reuse against an existing Join Server registration.
+Recovery is allowed only when server/device state is deliberately synchronized—for example, after deleting/re-registering the TTS device and applying the new matching firmware credentials—then one local erase may be used to remove the previous activation's NVS state. After that, normal flashing must preserve NVS.
 
-Recovery depends on server state:
+## What happened next
 
-- If the TTS end device was deliberately deleted/re-registered/reprovisioned and the firmware now contains that fresh registration's matching credentials, the old local nonce blob belongs to the previous activation configuration. In that specific synchronized reprovisioning case, erase the local NVS/flash once, flash the new matching configuration, and then stop erasing NVS for subsequent tests.
-- If the TTS registration was **not** freshly reprovisioned, do not erase local persistence merely to bypass `-1119`; first restore a consistent device/server activation state.
+The TTS device was recreated and clean post-reprovision tests followed. A later build-log review then found that local `dependencies.lock` had still selected RadioLib PR-head `f0fb0295...` despite the manifest requesting merge commit `12e3ed6c...`.
 
-This `-1119` event occurs before any OTAA RF exchange and is therefore separate from the unresolved `-1116` JoinAccept receive investigation.
+After `idf.py -C firmware/s3 update-dependencies`, a true merged-state physical build was obtained. In that newer capture:
 
-## Next clean test
+- RadioLib resolves `12e3ed6c...`;
+- RadioLib reports `Platform: "ESP-IDF"`;
+- current TTS and firmware DevEUI both equal `70B3D57ED0078C76`;
+- local OTAA still ends in `-1116`;
+- but TTS Live Data shows no activity for those attempts.
 
-1. Restore server/device nonce consistency. Safest development path after the full flash erase is to delete/re-register (reprovision) the TTS end device so Join Server nonce history starts consistently with the erased device. Preserve matching JoinEUI/DevEUI/root-key configuration; rotate root keys if desired and update firmware accordingly.
-2. If credentials were changed during that reprovisioning and the device still contains an old `nonce_state=present` blob, perform the one synchronized local erase described above.
-3. Use ESP-IDF 6.1 to match CI/reference builds.
-4. Flash normally after synchronization; do **not** erase NVS again.
-5. Leave structured LoRaWAN diagnostics and `RLB_DBG/RLB_PRO` enabled; leave `RLB_SPI` disabled initially.
-6. Capture the TTS events for the same JoinRequest, especially `ns.up.join.process`, Join Server acceptance/rejection details, `ns.down.join.schedule.*`, and `gs.down.*`/TX acknowledgement events when visible.
-7. If TTS proves a JoinAccept was scheduled/transmitted and RadioLib still closes both windows empty, enable full `RLB_SPI` for one attempt and compare the command sequence around RX1/RX2 against RadioLib issue #1806 / PR #1811.
+That changes the immediate diagnosis: current gateway/uplink reception must be proven before using `-1116` as evidence about JoinAccept RX. See the merged-state evidence file linked above.
 
 ## References
 
-- RadioLib issue #1806: ESP32-S3 + SX1262 JoinAccept/downlink `-1116`, including reproduction on XIAO ESP32-S3 + Wio-SX1262.
-- RadioLib PR #1811: LoRa symbol-timeout receive-window fix, tested ESP32 + SX1262 + TTN.
-- RadioLib LoRaWAN persistence implementation: the Nonces buffer stores an activation checksum and rejects a buffer when keys/mode/plan do not match the current configuration (`RADIOLIB_ERR_NONCES_DISCARDED`, `-1119`).
-- The Things Stack device troubleshooting: LoRaWAN 1.1 DevNonce must increase; same/lower values can be rejected as `DevNonce is too small`.
-- The Things Stack End Device API: `last_dev_nonce` is stored in the Join Server for LoRaWAN 1.1+ devices.
+- RadioLib issue #1806: ESP32-S3 + SX1262 JoinAccept/downlink `-1116`, including XIAO ESP32-S3 + Wio-SX1262.
+- RadioLib PR #1811: LoRa symbol-timeout receive-window fix.
+- RadioLib persistence: activation checksum and fail-closed `RADIOLIB_ERR_NONCES_DISCARDED (-1119)` behavior.
+- The Things Stack LoRaWAN 1.1 DevNonce handling.
