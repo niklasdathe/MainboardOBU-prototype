@@ -150,6 +150,29 @@ Airtime and retry scheduling
 Diagnostics
 ```
 
+### Initial OTAA JoinRequest data rate
+
+`Activation and network` contains:
+
+```text
+Initial OTAA uplink data rate (EU868 DR0..DR5)
+```
+
+Mapping:
+
+```text
+DR0 = SF12 / BW125
+DR1 = SF11 / BW125
+DR2 = SF10 / BW125
+DR3 = SF9  / BW125
+DR4 = SF8  / BW125
+DR5 = SF7  / BW125
+```
+
+Default is **DR3**, preserving the original BicycleOBU behavior. The setting affects the pre-activation JoinRequest uplink. ADR is temporarily disabled while RadioLib applies the configured data rate and is enabled again for normal network-controlled operation. A restored valid session is not overwritten by this setting.
+
+For a coverage diagnostic when TTS sees no JoinRequest at DR3, try **DR0**. DR0 provides the strongest link budget at the cost of substantially greater airtime; it is a diagnostic tool, not a reason to bypass normal duty-cycle handling.
+
 The Wio-SX1262 hardware profile is:
 
 ```text
@@ -233,6 +256,8 @@ RADIOLIB_ERR_NONCES_DISCARDED (-1119)
 
 That is intentional fail-closed behavior. Only erase local state when the matching development end-device state in TTS is deliberately reprovisioned/synchronized as well.
 
+Changing only the diagnostic initial JoinRequest data rate does not change the OTAA identity/root credentials and does not justify erasing NVS.
+
 ## 8. OTAA diagnostic mode
 
 Navigate to:
@@ -251,7 +276,7 @@ Recommended first diagnostic capture:
 [ ] Enable RadioLib full SPI trace
 ```
 
-The structured log includes radio control-line snapshots, activation duration, duty-cycle timing, persistence state and human-readable RadioLib errors. Root keys are never intentionally logged.
+The structured log includes radio control-line snapshots, activation duration, duty-cycle timing, configured join data rate, public EUIs, persistence state and human-readable RadioLib errors. Root keys are never intentionally logged.
 
 Use full SPI trace only for one short attempt after TTS proves a JoinAccept was actually transmitted and the device still misses it.
 
@@ -265,6 +290,8 @@ ns.down.join.schedule.success | ns.down.join.schedule.fail
 gs.down.send
 gs.down.tx.success | gs.down.tx.fail
 ```
+
+If TTS Live Data is empty at DR3, a useful next controlled test is DR0/SF12 near a known active gateway. Verify the local `RLB_PRO` trace actually changes the JoinRequest to SF12 before interpreting the result.
 
 ## 9. Persistent activation acceptance test
 
