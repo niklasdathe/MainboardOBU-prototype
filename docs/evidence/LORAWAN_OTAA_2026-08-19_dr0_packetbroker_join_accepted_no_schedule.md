@@ -5,6 +5,7 @@ This note records the first controlled OTAA attempt in which all of the followin
 - current TTS registration and firmware activation identity matched;
 - the local RadioLib dependency was the intended PR #1811 merge commit `12e3ed6c4814e177a87a7b2c48ab11dd65788143`;
 - RadioLib reported native `Platform: "ESP-IDF"`;
+- the project-standard ESP-IDF 6.0.2 toolchain was used;
 - initial OTAA data rate was deliberately forced to EU868 DR0 / SF12;
 - the JoinRequest was actually received by The Things Stack and accepted by the Join Server.
 
@@ -31,9 +32,10 @@ The build resolved:
 ```text
 RadioLib (12e3ed6c4814e177a87a7b2c48ab11dd65788143)
 RadioLib Platform: ESP-IDF
+ESP-IDF: 6.0.2
 ```
 
-The local ESP-IDF version for this physical capture was still 6.0.2. CI/reference remains ESP-IDF 6.1.
+The branch workflow has also been aligned to `espressif/idf:v6.0.2`, matching the project-wide CI/toolchain choice.
 
 Startup reported:
 
@@ -157,7 +159,6 @@ The result is stronger than the previous `no TTS activity` capture: uplink/gatew
 4. If a direct/current gateway produces `ns.down.join.schedule.success` and `gs.down.tx.success`, compare the exact downlink parameters with RadioLib RX1/RX2.
 5. Only if TTS proves the JoinAccept was transmitted and the device still returns `-1116`, enable one full RadioLib SPI trace and instrument GPIO38/RXEN transitions during RX1/RX2.
 6. If the device joins through a direct/current gateway, treat the legacy Packet Broker forwarding path as the cause/limitation and do not change the working SX1262 RX configuration.
-7. Repeat the final controlled test under ESP-IDF 6.1 to match CI/reference after the gateway-path question is resolved.
 
 ## Related sources
 
