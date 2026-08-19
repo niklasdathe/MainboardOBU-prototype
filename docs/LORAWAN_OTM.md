@@ -28,7 +28,9 @@ RADIOLIB_LORAWAN_SESSION_RESTORED (-1117)
 activated=yes
 ```
 
-The latest application-path test also demonstrates that the C5 receives real ITS-G5 traffic and the S3 locally transmits a LoRaWAN fragment. TTS application Live Data was empty for that fragment, so the current blocker is gateway/network reception of the application uplink, before the bridge.
+The latest Network Server MAC-state export proves that the active session is also receiving application uplinks over the network. The server has accepted multiple `UNCONFIRMED_UP` frames on FPort 10 with FCnt values including 0, 1, 2, 3, 10, 11, 12 and 13. These were heard through both Packet Broker and a current eu1 gateway (`eui-a840411f3ff64150`). Therefore the current blocker is no longer SX1262 TX or gateway reception.
+
+The remaining gap is between Network Server acceptance and the Application Server/streaming layer used by Console Live Data and the MQTT bridge. The next diagnostic is to subscribe directly to the TTS Application Server MQTT topic and determine whether application uplinks are being forwarded there.
 
 See [`LORAWAN_OTAA_DEBUG.md`](LORAWAN_OTAA_DEBUG.md) only if activation stops working again.
 
@@ -131,7 +133,7 @@ Uplink topic:    v3/bicycleobu@ttn/devices/bicycleobu/up
 
 The bridge reads `uplink_message.frm_payload`, base64-decodes it, filters FPort 10 and reassembles by device/frame sequence.
 
-If TTS Live Data is empty, the bridge is not the cause: no application event exists for it to consume. A RadioLib `Uplink sent` line proves local radio transmission only, not gateway reception.
+The Network Server MAC-state view is not the same as an Application Server uplink stream. The NS can accept a valid LoRaWAN frame and retain its encrypted FRMPayload while the bridge still sees nothing if that uplink is not being forwarded through the Application Server. When diagnosing this boundary, subscribe directly to `v3/bicycleobu@ttn/devices/+/up`; if that stream is empty while NS FCnt continues to advance, investigate the device's Application Server registration/session binding rather than RF.
 
 ## OpenTrafficMap MQTT
 
@@ -200,10 +202,11 @@ Do not erase the S3 flash/NVS. A normal firmware reflash preserves the current L
 1. Keep the Docker bridge running and confirm both MQTT connections.
 2. Receive actual ITS-G5 traffic on the C5.
 3. Confirm the S3 reports `C5 V2X RX` and a fragment transmission.
-4. Confirm TTS Live Data shows FPort 10. If it does not, debug RF/gateway/session reception before the bridge.
-5. Once TTS receives fragments, confirm the bridge logs each accepted fragment.
-6. Wait for a complete frame and confirm `published C-ITS frame to OpenTrafficMap`.
-7. Check OpenTrafficMap for the decoded traffic represented by the forwarded frame.
+4. Confirm Network Server MAC state FCnt advances for FPort-10 uplinks.
+5. Subscribe directly to the TTS Application Server MQTT `.../devices/+/up` topic. If NS FCnt advances but MQTT stays empty, debug the NS -> AS/session binding.
+6. Once TTS application MQTT receives fragments, confirm the bridge logs each accepted fragment.
+7. Wait for a complete frame and confirm `published C-ITS frame to OpenTrafficMap`.
+8. Check OpenTrafficMap for the decoded traffic represented by the forwarded frame.
 
 ## Persistence rule
 
