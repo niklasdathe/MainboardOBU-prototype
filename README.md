@@ -12,7 +12,7 @@ This is a research prototype. Experimental safety and V2X-transmit functions are
 |---|---|
 | ESP32-C5 radio endpoint | ITS-G5 raw RX/TX boundary, metadata, bounded buffering, status and fail-safe per-boot TX arming implemented |
 | ESP32-S3 hub | Canonical event bus, SPI link, GNSS/time, OLED, local buzzer, SD diagnostic logging and optional LoRaWAN collection uplink implemented |
-| LoRaWAN OTM uplink | Wio-SX1262 OTAA/EU868 transport, NVS nonce/session persistence, bounded raw-frame fragmentation and TTS MQTT -> OpenTrafficMap bridge implemented; JoinRequest reaches/gets accepted by TTS but physical JoinAccept RX is still under investigation (`-1116`) |
+| LoRaWAN OTM uplink | Wio-SX1262 OTAA/EU868 transport, NVS nonce/session persistence and raw-frame fragmentation implemented; physical session persistence/restoration is demonstrated; TTS MQTT -> OpenTrafficMap bridge is implemented and the final application-frame end-to-end check is in progress |
 | Local warning output | Expansion Base passive buzzer on A3/D3 (XIAO S3 GPIO4), asynchronous output, runtime mute boundary and warning-episode deduplication implemented |
 | Hardware abstraction | Replaceable display, warning-output, radio, GNSS, uplink and standards interfaces; YAML hardware profiles validated at integration time |
 | ETSI VAM conformance | Explicit codec/PoTi/security/GN-BTP-DCC gates exist; production implementations and HIL/RF verification remain pending |
@@ -25,6 +25,7 @@ Source review and a successful firmware build are not complete-system validation
 |---|---|
 | Understand the component split | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
 | Configure Wio-SX1262 -> OpenTrafficMap | [`docs/LORAWAN_OTM.md`](docs/LORAWAN_OTM.md) |
+| Run the TTS -> OpenTrafficMap bridge | [`tools/lorawan_otm_bridge/README.md`](tools/lorawan_otm_bridge/README.md) |
 | Diagnose OTAA / JoinAccept failures | [`docs/LORAWAN_OTAA_DEBUG.md`](docs/LORAWAN_OTAA_DEBUG.md) |
 | Find the document for a development task | [`docs/README.md`](docs/README.md) |
 | Check workbook coverage and open verification | [`docs/REQUIREMENT_TRACEABILITY.md`](docs/REQUIREMENT_TRACEABILITY.md) |
@@ -117,7 +118,7 @@ The direct OpenTrafficMap Wi-Fi upload is parked and excluded from the normal S3
 | System/acceptance requirements | `BicycleOBU_Requirements_v1_1_ETSI_VITS_S.xlsx` in the parent project |
 | Prototype responsibilities and data flow | `docs/ARCHITECTURE.md` |
 | LoRaWAN/OpenTrafficMap setup | `docs/LORAWAN_OTM.md` |
-| OTAA/JoinAccept investigation history | `docs/LORAWAN_OTAA_DEBUG.md` |
+| OTAA troubleshooting conclusions | `docs/LORAWAN_OTAA_DEBUG.md` |
 | Implemented/open requirement mapping | `docs/REQUIREMENT_TRACEABILITY.md` |
 | Pin ownership and accessory conflicts | `config/hardware/*.yaml` + `scripts/check_pin_plan.py` |
 | C5/S3 protocol | `components/obu_ipc/` |
