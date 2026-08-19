@@ -1,0 +1,21 @@
+services:
+  lorawan-otm-bridge:
+    build:
+      context: .
+    container_name: bicycleobu-lorawan-otm-bridge
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
