@@ -4,5 +4,3 @@ __pycache__/
 *.pyc
 tests/
 README.md
-compose.yaml
-Dockerfile
