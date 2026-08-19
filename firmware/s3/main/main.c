@@ -258,196 +258,90 @@ static void ingest_ipc(const obu_ipc_message_t *m)
             return;
         }
 
-        c5_rx_frame_count++;
-        hmi.v2x_rx_count = c5_rx_frame_count;
-        hmi.v2x_last_rssi_dbm = w.meta.rssi_dbm;
-        hmi.v2x_last_frequency_mhz = w.meta.frequency_mhz;
         update_v2x_hmi_and_geiger(frame, w.frame_len);
 
-        if (c5_rx_frame_count == 1u || (c5_rx_frame_count % 100u) == 0u) {
-            ESP_LOGI(TAG,
-                     "C5 V2X RX #%u: c5_seq=%u len=%u freq=%uMHz rssi=%ddBm hw_ts=%llu us",
-                     (unsigned)c5_rx_frame_count,
-                     (unsigned)w.meta.c5_sequence,
-                     (unsigned)w.frame_len,
-                     (unsigned)w.meta.frequency_mhz,
-                     (int)w.meta.rssi_dbm,
-                     (unsigned long long)w.meta.radio_hw_timestamp_us);
-        }
-
         obu_event_t *e = prepare_main_event();
-        e->source = OBU_SOURCE_C5_RADIO;
-        e->type = OBU_DATA_V2X_RAW_RX;
+        e->source = OBU_SOURCE_V2X;
+        e->type = OBU_DATA_V2X_RX_FRAME;
         e->sequence = seq++;
-        e->flags = OBU_EVENT_F_RAW | OBU_EVENT_F_VALID;
-        e->source_monotonic_us = w.meta.c5_rx_monotonic_us;
-        e->hub_monotonic_us = c5_to_s3_monotonic(w.meta.c5_rx_monotonic_us);
-        e->validity_ms = 0;
+        e->flags = OBU_EVENT_F_VALID;
+        e->source_monotonic_us = c5_to_s3_monotonic(w.meta.rx_monotonic_us);
+        e->hub_monotonic_us = obu_monotonic_us();
         e->payload_len = (uint16_t)total;
         memcpy(e->payload, &w.meta, sizeof(w.meta));
         memcpy(e->payload + sizeof(w.meta), frame, w.frame_len);
         stamp_event_utc(e);
         (void)obu_bus_publish(&bus, e);
-    } else if (m->type == OBU_IPC_RADIO_STATUS && m->payload_len >= sizeof(obu_radio_status_t)) {
-        obu_radio_status_t s;
-        memcpy(&s, m->payload, sizeof(s));
-        const bool boot_changed = c5_status_count != 0u && c5_last_boot_nonce != s.boot_nonce;
-        const bool state_changed = c5_status_count == 0u || boot_changed || hmi.c5_online != s.radio_running;
-        if (boot_changed) {
-            ESP_LOGW(TAG, "C5 reboot detected: boot_nonce %u -> %u; discarding old clock relation",
-                     (unsigned)c5_last_boot_nonce, (unsigned)s.boot_nonce);
+    } else if (m->type == OBU_IPC_RADIO_STATUS && m->payload_len >= sizeof(obu_ipc_radio_status_t)) {
+        obu_ipc_radio_status_t st;
+        memcpy(&st, m->payload, sizeof(st));
+        c5_status_count++;
+        if (st.boot_nonce != 0 && c5_last_boot_nonce != 0 && st.boot_nonce != c5_last_boot_nonce) {
             reset_c5_clock("C5 boot nonce changed");
             publish_clock_status();
         }
-        c5_status_count++;
-        c5_last_boot_nonce = s.boot_nonce;
-        hmi.c5_online = s.radio_running;
-
-        if (state_changed || (c5_status_count % 5u) == 0u) {
+        if (st.boot_nonce != 0) c5_last_boot_nonce = st.boot_nonce;
+        if (c5_status_count == 1 || (c5_status_count % 5U) == 0) {
             ESP_LOGI(TAG,
                      "C5 status #%u: radio=%s tx_armed=%s freq=%uMHz fw=%s boot_nonce=%u rx=%u drop_buf=%u drop_size=%u ipc_drop=%u tx=%u/%u failed=%u reset=%u",
                      (unsigned)c5_status_count,
-                     s.radio_running ? "ON" : "OFF",
-                     s.tx_armed ? "YES" : "NO",
-                     (unsigned)s.frequency_mhz,
-                     s.firmware_version,
-                     (unsigned)s.boot_nonce,
-                     (unsigned)s.rx_frames,
-                     (unsigned)s.rx_drop_no_buffer,
-                     (unsigned)s.rx_drop_oversize,
-                     (unsigned)s.ipc_drop,
-                     (unsigned)s.tx_success,
-                     (unsigned)s.tx_requests,
-                     (unsigned)s.tx_failed,
-                     (unsigned)s.reset_reason);
+                     st.radio_on ? "ON" : "OFF",
+                     st.tx_armed ? "YES" : "NO",
+                     (unsigned)st.frequency_mhz,
+                     st.firmware_version,
+                     (unsigned)st.boot_nonce,
+                     (unsigned)st.rx_frames,
+                     (unsigned)st.rx_drop_buffer,
+                     (unsigned)st.rx_drop_size,
+                     (unsigned)st.ipc_drop,
+                     (unsigned)st.tx_success,
+                     (unsigned)st.tx_attempts,
+                     (unsigned)st.tx_failed,
+                     (unsigned)st.reset_reason);
         }
-
-        obu_event_t *e = prepare_main_event();
-        e->source = OBU_SOURCE_C5_RADIO;
-        e->type = OBU_DATA_RADIO_STATUS;
-        e->sequence = seq++;
-        e->flags = OBU_EVENT_F_VALID;
-        e->source_monotonic_us = m->source_monotonic_us;
-        e->hub_monotonic_us = c5_to_s3_monotonic(m->source_monotonic_us);
-        e->payload_len = sizeof(s);
-        memcpy(e->payload, &s, sizeof(s));
-        stamp_event_utc(e);
-        (void)obu_bus_publish(&bus, e);
-    } else if (m->type == OBU_IPC_TX_RESULT) {
-        ESP_LOGI(TAG, "C5 TX result received: seq=%u payload=%u", (unsigned)m->sequence, (unsigned)m->payload_len);
-        obu_event_t *e = prepare_main_event();
-        e->source = OBU_SOURCE_C5_RADIO;
-        e->type = OBU_DATA_V2X_TX_RESULT;
-        e->sequence = seq++;
-        e->flags = OBU_EVENT_F_VALID;
-        e->source_monotonic_us = m->source_monotonic_us;
-        e->hub_monotonic_us = c5_to_s3_monotonic(m->source_monotonic_us);
-        e->payload_len = m->payload_len;
-        memcpy(e->payload, m->payload, m->payload_len);
-        stamp_event_utc(e);
-        (void)obu_bus_publish(&bus, e);
-    } else if (m->type == OBU_IPC_TIME_RESPONSE && m->payload_len >= 24) {
-        uint64_t t1, t2, t3;
-        memcpy(&t1, m->payload, 8);
-        memcpy(&t2, m->payload + 8, 8);
-        memcpy(&t3, m->payload + 16, 8);
-        update_clock_relation(t1, t2, t3, obu_monotonic_us());
+    } else if (m->type == OBU_IPC_TIME_RESPONSE && m->payload_len >= sizeof(obu_ipc_time_response_t)) {
+        obu_ipc_time_response_t tr;
+        memcpy(&tr, m->payload, sizeof(tr));
         c5_time_response_count++;
-        if (c5_time_response_count == 1u || (c5_time_response_count % 5u) == 0u) {
-            int64_t offset;
-            uint32_t rtt;
-            uint32_t samples;
+        update_clock_relation(tr.t1_s3_us, tr.t2_c5_us, tr.t3_c5_us, obu_monotonic_us());
+        if (c5_time_response_count == 1 || (c5_time_response_count % 5U) == 0) {
             portENTER_CRITICAL(&c5_clock.lock);
-            offset = c5_clock.c5_to_s3_offset_us;
-            rtt = c5_clock.last_rtt_us;
-            samples = c5_clock.samples;
+            const uint32_t samples = c5_clock.samples;
+            const uint32_t rtt = c5_clock.last_rtt_us;
+            const int64_t offset = c5_clock.c5_to_s3_offset_us;
             portEXIT_CRITICAL(&c5_clock.lock);
-            ESP_LOGI(TAG, "C5 clock sync: responses=%u samples=%u RTT=%uus offset=%lldus",
-                     (unsigned)c5_time_response_count, (unsigned)samples, (unsigned)rtt, (long long)offset);
+            ESP_LOGI(TAG,
+                     "C5 clock sync: responses=%u samples=%u RTT=%uus offset=%lldus",
+                     (unsigned)c5_time_response_count,
+                     (unsigned)samples,
+                     (unsigned)rtt,
+                     (long long)offset);
         }
-        publish_clock_status();
-    } else {
-        ESP_LOGW(TAG, "Unhandled C5 IPC message type=%s(%u) payload=%u",
-                 ipc_type_name(m->type), (unsigned)m->type, (unsigned)m->payload_len);
     }
 }
 
 static void monitor_c5_link(void)
 {
+    if (!c5_link_online || c5_last_message_us == 0) return;
     const uint64_t now = obu_monotonic_us();
-    hmi.c5_message_count = c5_message_count;
-
-    if (c5_last_message_us == 0) {
-        hmi.c5_last_age_ms = 0xffffffffU;
-        if (now > 3000000ULL && (c5_last_link_report_us == 0 || now - c5_last_link_report_us >= 5000000ULL)) {
-            c5_last_link_report_us = now;
-            ESP_LOGW(TAG,
-                     "No application message from C5 yet. Check power/GND and SPI wiring: S3 GPIO7(SCLK)->C5 GPIO8, GPIO9(MOSI)->C5 GPIO10, GPIO8(MISO)<-C5 GPIO9, GPIO1(CS)->C5 GPIO1");
-        }
-        return;
-    }
-
-    const uint64_t age_us = now - c5_last_message_us;
-    const uint64_t age_ms = age_us / 1000ULL;
-    hmi.c5_last_age_ms = age_ms > 0xfffffffeULL ? 0xfffffffeU : (uint32_t)age_ms;
-
-    if (age_us > 3000000ULL && c5_link_online) {
+    if (now - c5_last_message_us > 3000000ULL) {
         c5_link_online = false;
-        hmi.c5_online = false;
         reset_c5_clock("C5 application link timeout");
         publish_clock_status();
-        ESP_LOGW(TAG, "C5 application IPC timeout: no message for %llu ms; waiting for automatic recovery",
-                 (unsigned long long)(age_us / 1000ULL));
+        ESP_LOGW(TAG, "C5 application IPC timed out after %llu ms",
+                 (unsigned long long)((now - c5_last_message_us) / 1000ULL));
     }
-
-    if (now - c5_last_link_report_us >= 10000000ULL) {
+    if (now - c5_last_link_report_us > 10000000ULL) {
         c5_last_link_report_us = now;
-        ESP_LOGI(TAG, "C5 application link: %s messages=%u status=%u time_rsp=%u v2x_frames=%u last_age=%llu ms",
-                 c5_link_online ? "ACTIVE" : "STALE",
+        ESP_LOGI(TAG,
+                 "C5 application link: %s messages=%u status=%u time_rsp=%u v2x_frames=%u last_age=%llu ms",
+                 c5_link_online ? "ACTIVE" : "INACTIVE",
                  (unsigned)c5_message_count,
                  (unsigned)c5_status_count,
                  (unsigned)c5_time_response_count,
                  (unsigned)c5_rx_frame_count,
-                 (unsigned long long)(age_us / 1000ULL));
-    }
-}
-
-static void process_gnss(const obu_event_t *e)
-{
-    if (e->type != OBU_DATA_GNSS_FIX || e->payload_len < sizeof(obu_gnss_fix_t)) return;
-    obu_gnss_fix_t f;
-    memcpy(&f, e->payload, sizeof(f));
-    hmi.gnss_valid = f.position_valid;
-    if (f.velocity_valid) {
-        hmi.speed_valid = true;
-        hmi.speed_kmh = (float)f.speed_mm_s * 0.0036f;
-    }
-    if (f.utc_valid) {
-        (void)obu_time_ingest_gnss_utc(&timesvc, f.utc_ns,
-                                       e->hub_monotonic_us ? e->hub_monotonic_us : e->source_monotonic_us,
-                                       true);
-    }
-}
-
-static void process_warning(const obu_event_t *e)
-{
-    obu_warning_notification_t warning = {
-        .notification_id = 0,
-        .kind = OBU_WARNING_KIND_DENM,
-        .severity = OBU_WARNING_SEVERITY_WARNING,
-        .active = true,
-        .audible = true,
-    };
-    snprintf(warning.text, sizeof(warning.text), "V2X WARNING");
-
-    if (e->payload_len >= sizeof(warning)) memcpy(&warning, e->payload, sizeof(warning));
-
-    hmi.warning = warning.kind == OBU_WARNING_KIND_SYSTEM ? OBU_HMI_WARN_SYSTEM : OBU_HMI_WARN_DENM;
-    snprintf(hmi.warning_text, sizeof(hmi.warning_text), "%s", warning.text[0] ? warning.text : "V2X WARNING");
-
-    if (warning_output_ready) {
-        esp_err_t err = obu_warning_controller_handle(&warning_controller, &warning);
-        if (err != ESP_OK && err != ESP_ERR_TIMEOUT) ESP_LOGW(TAG, "warning output failed: %s", esp_err_to_name(err));
+                 c5_last_message_us == 0 ? 0ULL :
+                 (unsigned long long)((now - c5_last_message_us) / 1000ULL));
     }
 }
 
@@ -456,63 +350,16 @@ static void event_consumer(void *arg)
     (void)arg;
     for (;;) {
         if (xQueueReceive(event_queue, &event_consumer_scratch, portMAX_DELAY) != pdTRUE) continue;
-        obu_event_t *e = &event_consumer_scratch;
-        process_gnss(e);
-        if (!e->utc_ns) stamp_event_utc(e);
-        if (logger && (e->type == OBU_DATA_DIAGNOSTIC || e->type == OBU_DATA_RADIO_STATUS ||
-                       e->type == OBU_DATA_V2X_TX_RESULT || e->type == OBU_DATA_CLOCK_SYNC || !(e->flags & OBU_EVENT_F_VALID))) {
-            (void)obu_diag_log_event(logger, e, "event");
-        }
-        if (e->type == OBU_DATA_WARNING) process_warning(e);
-    }
-}
-
-static void hmi_task(void *arg)
-{
-    (void)arg;
-    for (;;) {
-#ifdef CONFIG_OBU_LORAWAN_ENABLE
-        if (lorawan != NULL) {
-            obu_lorawan_stats_t stats;
-            obu_lorawan_get_stats(lorawan, &stats);
-            hmi.lorawan_ready = true;
-            hmi.lorawan_joined = stats.joined;
-            hmi.lorawan_signal_valid = stats.link_metrics_valid;
-            hmi.lorawan_last_rssi_dbm = stats.last_downlink_rssi_dbm;
-            hmi.lorawan_last_snr_db = stats.last_downlink_snr_db;
-            hmi.lorawan_frames_sent = stats.frames_sent;
-            hmi.lorawan_tx_errors = stats.tx_errors;
-            hmi.lorawan_join_attempts = stats.join_attempts;
-            hmi.lorawan_join_failures = stats.join_failures;
-        }
-#endif
-        if (display.ops != NULL && display.ops->render != NULL) (void)display.ops->render(&display, &hmi);
-        vTaskDelay(pdMS_TO_TICKS(200));
-    }
-}
-
-static void time_probe_task(void *arg)
-{
-    (void)arg;
-    for (;;) {
-        memset(&time_probe_message, 0, sizeof(time_probe_message));
-        time_probe_message.type = OBU_IPC_TIME_PROBE;
-        time_probe_message.sequence = ipc_seq++;
-        time_probe_message.source_monotonic_us = obu_monotonic_us();
-        time_probe_message.payload_len = 8;
-        memcpy(time_probe_message.payload, &time_probe_message.source_monotonic_us, 8);
-        const esp_err_t err = obu_ipc_send(ipc, &time_probe_message, pdMS_TO_TICKS(5));
-        if (err != ESP_OK) ESP_LOGW(TAG, "Failed to queue C5 time probe: %s", esp_err_to_name(err));
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        if (logger) (void)obu_diag_logger_submit(logger, &event_consumer_scratch);
     }
 }
 
 static void IRAM_ATTR pps_isr(void *arg)
 {
     (void)arg;
-    uint64_t now = (uint64_t)esp_timer_get_time();
+    uint64_t now = obu_monotonic_us();
     BaseType_t hp = pdFALSE;
-    (void)xQueueSendFromISR(pps_queue, &now, &hp);
+    if (pps_queue) xQueueSendFromISR(pps_queue, &now, &hp);
     if (hp) portYIELD_FROM_ISR();
 }
 
@@ -672,6 +519,7 @@ void app_main(void)
         .dev_eui_hex = CONFIG_OBU_LORAWAN_DEV_EUI,
         .nwk_key_hex = CONFIG_OBU_LORAWAN_NWK_KEY,
         .app_key_hex = CONFIG_OBU_LORAWAN_APP_KEY,
+        .join_datarate = CONFIG_OBU_LORAWAN_JOIN_DATARATE,
         .fport = CONFIG_OBU_LORAWAN_FPORT,
         .max_frame_bytes = CONFIG_OBU_LORAWAN_MAX_FRAME_BYTES,
         .fragment_data_bytes = CONFIG_OBU_LORAWAN_FRAGMENT_DATA_BYTES,
