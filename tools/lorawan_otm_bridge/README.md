@@ -49,7 +49,7 @@ $env:LORAWAN_FRAME_FPORT = '10'
 $env:OTM_NODE_ID = 'bicycleobu-70b3d57ed0078c82'
 ```
 
-OpenTrafficMap publishing currently uses TLS on `cits1.opentrafficmap.org:8883` and does not require a username/password. Node registration is optional; use the OpenTrafficMap node-registration/self-service process if a friendly name or map-visible receiver location is wanted.
+OpenTrafficMap publishing currently uses TLS on `cits1.opentrafficmap.org:8883` and does not require a username/password. Node registration is optional for packet ingestion; use the OpenTrafficMap node-registration/self-service process if a friendly receiver name, map-visible receiver location, or subscriber credentials are wanted.
 
 Optional metadata overrides:
 
@@ -89,6 +89,6 @@ One received ITS-G5 frame usually spans multiple LoRaWAN uplinks, so seeing an i
 4. Confirm the S3 log reports C5 RX frames and LoRaWAN fragments/application uplinks.
 5. Confirm TTS application Live Data shows FPort 10 uplinks.
 6. Confirm the bridge logs one completed `published C-ITS frame` line.
-7. Check OpenTrafficMap for the decoded traffic represented by those frames. Node registration is not required for packet ingestion, but a registered/friendly node makes receiver attribution easier.
+7. Check OpenTrafficMap for the decoded traffic represented by those frames. A node does not have to be registered for ingestion, but registration/friendly naming makes receiver attribution and map placement easier.
 
 If TTS receives no FPort 10 application uplinks, debug the LoRaWAN/application path first. If TTS receives all fragments but the bridge does not publish, run with `$env:LOG_LEVEL='DEBUG'` and check FPort/device filtering and reassembly errors. If the bridge publishes successfully but nothing is rendered by OTM, verify that the C5 payload is a valid raw ITS-G5/802.11p frame and that the OTM node/topic is correct.
