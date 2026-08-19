@@ -9,11 +9,10 @@ Use the document that matches the task; keep detailed terminal captures out of t
 | Understand the C5/S3 responsibility split and event flow | [`ARCHITECTURE.md`](ARCHITECTURE.md) |
 | Wire or change prototype hardware | [`HARDWARE.md`](HARDWARE.md) |
 | Build both targets and interpret CI | [`DEVELOPMENT.md`](DEVELOPMENT.md) |
-| Configure and run Wio-SX1262 LoRaWAN -> OpenTrafficMap | [`LORAWAN_OTM.md`](LORAWAN_OTM.md) |
+| Configure Wio-SX1262 LoRaWAN -> OpenTrafficMap | [`LORAWAN_OTM.md`](LORAWAN_OTM.md) |
+| Run the TTS -> OpenTrafficMap bridge | [`../tools/lorawan_otm_bridge/README.md`](../tools/lorawan_otm_bridge/README.md) |
 | Diagnose OTAA / JoinAccept behavior | [`LORAWAN_OTAA_DEBUG.md`](LORAWAN_OTAA_DEBUG.md) |
 | Check whether a workbook requirement is implemented or still awaiting evidence | [`REQUIREMENT_TRACEABILITY.md`](REQUIREMENT_TRACEABILITY.md) |
-
-The executable TTS -> OpenTrafficMap bridge has its own short operator guide at [`../tools/lorawan_otm_bridge/README.md`](../tools/lorawan_otm_bridge/README.md).
 
 ## Engineering references
 
