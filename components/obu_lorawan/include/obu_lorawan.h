@@ -33,6 +33,7 @@ typedef struct {
     const char *dev_eui_hex;
     const char *nwk_key_hex;
     const char *app_key_hex;
+    uint8_t join_datarate;
     uint8_t fport;
     uint16_t max_frame_bytes;
     uint8_t fragment_data_bytes;
