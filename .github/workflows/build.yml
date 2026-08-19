@@ -25,6 +25,9 @@ jobs:
           python -m unittest discover -s tests -v
           python -m py_compile protocol.py bridge.py
           python -c "import bridge"
+      - name: Build LoRaWAN OpenTrafficMap bridge container
+        working-directory: tools/lorawan_otm_bridge
+        run: docker build -t bicycleobu-lorawan-otm-bridge:test .
 
   build-c5:
     runs-on: ubuntu-latest
