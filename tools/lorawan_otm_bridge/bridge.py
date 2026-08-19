@@ -30,6 +30,9 @@ class Config:
     otm_host: str
     otm_port: int
     otm_node_id: str
+    otm_version: str
+    otm_hw_variant: str
+    otm_emac: str | None
     fport: int
     device_id: str | None
     reassembly_timeout_s: float
@@ -46,6 +49,10 @@ class Config:
         if missing:
             raise ValueError("missing required environment variables: " + ", ".join(missing))
 
+        node_id = required["OTM_NODE_ID"]
+        if any(char in node_id for char in "/+#"):
+            raise ValueError("OTM_NODE_ID must not contain '/', '+' or '#'")
+
         username = required["TTS_MQTT_USERNAME"]
         return cls(
             tts_host=required["TTS_MQTT_HOST"],
@@ -55,7 +62,10 @@ class Config:
             tts_application_uid=os.getenv("TTS_APPLICATION_UID", username),
             otm_host=os.getenv("OTM_MQTT_HOST", "cits1.opentrafficmap.org"),
             otm_port=int(os.getenv("OTM_MQTT_PORT", "8883")),
-            otm_node_id=required["OTM_NODE_ID"],
+            otm_node_id=node_id,
+            otm_version=os.getenv("OTM_VERSION", "MainboardOBU-prototype/lorawan-otm-bridge"),
+            otm_hw_variant=os.getenv("OTM_HW_VARIANT", "xiao-esp32s3+wio-sx1262"),
+            otm_emac=os.getenv("OTM_EMAC") or None,
             fport=int(os.getenv("LORAWAN_FRAME_FPORT", "10")),
             device_id=os.getenv("LORAWAN_DEVICE_ID") or None,
             reassembly_timeout_s=float(os.getenv("LORAWAN_REASSEMBLY_TIMEOUT_S", "600")),
@@ -67,6 +77,7 @@ class Bridge:
         self.config = config
         self.reassembler = Reassembler(timeout_seconds=config.reassembly_timeout_s)
         self.stop_event = threading.Event()
+        self.otm_connected = threading.Event()
 
         self.otm = mqtt.Client(
             mqtt.CallbackAPIVersion.VERSION2,
@@ -98,16 +109,38 @@ class Bridge:
         return f"its/{self.config.otm_node_id}/status"
 
     @property
+    def info_topic(self) -> str:
+        return f"its/{self.config.otm_node_id}/info"
+
+    @property
     def tts_topic(self) -> str:
-        return f"v3/{self.config.tts_application_uid}/devices/+/up"
+        device = self.config.device_id or "+"
+        return f"v3/{self.config.tts_application_uid}/devices/{device}/up"
+
+    def _publish_otm_info(self) -> None:
+        info = {
+            "ver": self.config.otm_version,
+            "hwv": self.config.otm_hw_variant,
+            "transport": "lorawan",
+        }
+        if self.config.otm_emac:
+            info["emac"] = self.config.otm_emac
+        self.otm.publish(
+            self.info_topic,
+            payload=json.dumps(info, separators=(",", ":")),
+            qos=0,
+            retain=False,
+        )
 
     def _on_otm_connect(self, client, userdata, flags, reason_code, properties) -> None:
         del userdata, flags, properties
         if reason_code.is_failure:
             LOG.error("OpenTrafficMap MQTT connection rejected: %s", reason_code)
             return
+        self.otm_connected.set()
         LOG.info("connected to OpenTrafficMap MQTT at %s:%d", self.config.otm_host, self.config.otm_port)
         client.publish(self.status_topic, payload="online", qos=0, retain=True)
+        self._publish_otm_info()
 
     def _on_tts_connect(self, client, userdata, flags, reason_code, properties) -> None:
         del userdata, flags, properties
@@ -118,7 +151,9 @@ class Bridge:
         client.subscribe(self.tts_topic, qos=0)
 
     def _on_disconnect(self, client, userdata, disconnect_flags, reason_code, properties) -> None:
-        del client, userdata, disconnect_flags, properties
+        del userdata, disconnect_flags, properties
+        if client is self.otm:
+            self.otm_connected.clear()
         if reason_code.is_failure:
             LOG.warning("MQTT disconnected unexpectedly: %s", reason_code)
 
@@ -139,12 +174,16 @@ class Bridge:
             if frame is None:
                 return
 
+            if not self.otm_connected.is_set():
+                LOG.warning("dropping completed frame because OpenTrafficMap MQTT is disconnected")
+                return
+
             result = self.otm.publish(self.packet_topic, payload=frame, qos=0, retain=False)
             if result.rc != mqtt.MQTT_ERR_SUCCESS:
                 LOG.error("OpenTrafficMap publish enqueue failed: rc=%s", result.rc)
                 return
             LOG.info(
-                "published reassembled C-ITS frame: device=%s bytes=%d topic=%s",
+                "published C-ITS frame to OpenTrafficMap: device=%s bytes=%d topic=%s",
                 device_id,
                 len(frame),
                 self.packet_topic,
@@ -156,6 +195,8 @@ class Bridge:
         LOG.info("connecting OpenTrafficMap MQTT %s:%d", self.config.otm_host, self.config.otm_port)
         self.otm.connect(self.config.otm_host, self.config.otm_port, keepalive=60)
         self.otm.loop_start()
+        if not self.otm_connected.wait(timeout=10):
+            raise RuntimeError("OpenTrafficMap MQTT did not connect within 10 seconds")
 
         LOG.info("connecting The Things Stack MQTT %s:%d", self.config.tts_host, self.config.tts_port)
         self.tts.connect(self.config.tts_host, self.config.tts_port, keepalive=60)
