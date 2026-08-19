@@ -1,5 +1,17 @@
 menu "BicycleOBU prototype"
 
+config OBU_GNSS_PPS_GPIO
+    int "GNSS PPS GPIO"
+    range 0 48
+    default 47
+    help
+        GPIO carrying the L76K PPS pulse. The Wio-SX1262 B2B connector owns
+        GPIO41 as SX1262 NSS on the LoRaWAN prototype, so the L76K PPS carrier
+        must be rewired to GPIO47. Override only for a hardware profile without
+        the Wio-SX1262 attached.
+
+menu "Local warning and V2X diagnostics"
+
 config OBU_BUZZER_ENABLE
     bool "Enable Expansion Base local warning buzzer"
     default y
@@ -48,67 +60,139 @@ config OBU_GEIGER_COUNTER_DURATION_MS
     range 10 200
     default 25
 
-config OBU_OTM_DIRECT_ENABLE
-    bool "Enable direct OpenTrafficMap Wi-Fi uploader"
-    default n
-    select OBU_DNS_FALLBACK_ENABLE
-    help
-        Enable the development Wi-Fi/MQTT uplink to OpenTrafficMap. A fallback
-        DNS resolver is always enabled with this uploader so stale sdkconfig
-        state or a broken DHCP DNS relay cannot silently leave MQTT unable to
-        resolve the broker hostname.
+endmenu
 
-config OBU_WIFI_DEBUG
-    bool "Enable Wi-Fi debug diagnostics"
-    depends on OBU_OTM_DIRECT_ENABLE
+menu "LoRaWAN uplink"
+
+config OBU_LORAWAN_ENABLE
+    bool "Enable Wio-SX1262 LoRaWAN uplink"
     default n
     help
-        Enable additional development diagnostics for the S3 Wi-Fi uplink.
-        The firmware logs Wi-Fi driver/netif debug output, the effective STA
-        configuration, association details, disconnect reason names and the
-        DHCP/IP transition without printing the configured Wi-Fi password.
-        This option does not intentionally change connection policy and should
-        normally remain disabled outside troubleshooting sessions.
+        Enable the Seeed XIAO ESP32-S3 + Wio-SX1262 B2B radio as a
+        best-effort LoRaWAN uplink for received raw C-ITS frames. The device
+        sends binary fragments to a LoRaWAN network server; a server-side
+        bridge reassembles them and publishes the original frame to
+        OpenTrafficMap MQTT.
 
-config OBU_DNS_FALLBACK_ENABLE
-    bool
+menu "Activation and network"
+    depends on OBU_LORAWAN_ENABLE
+
+config OBU_LORAWAN_JOIN_EUI
+    string "JoinEUI (16 hex digits)"
+    default "0000000000000000"
+
+config OBU_LORAWAN_DEV_EUI
+    string "DevEUI (16 hex digits)"
+    default ""
+
+config OBU_LORAWAN_NWK_KEY
+    string "NwkKey (32 hex digits)"
+    default ""
+
+config OBU_LORAWAN_APP_KEY
+    string "AppKey (32 hex digits)"
+    default ""
+
+config OBU_LORAWAN_JOIN_DATARATE
+    int "Initial OTAA uplink data rate (EU868 DR0..DR5)"
+    range 0 5
+    default 3
+    help
+        Select the data rate used for JoinRequest uplinks before the network
+        can control the link through ADR. EU868 mapping is DR0=SF12, DR1=SF11,
+        DR2=SF10, DR3=SF9, DR4=SF8 and DR5=SF7, all at 125 kHz. DR3 preserves
+        the previous BicycleOBU behavior. For coverage diagnostics, DR0 gives
+        the largest link budget at the cost of substantially more airtime.
+        ADR remains enabled for normal operation after activation.
+
+endmenu
+
+menu "Payload and buffering"
+    depends on OBU_LORAWAN_ENABLE
+
+config OBU_LORAWAN_FPORT
+    int "Raw-frame fragment FPort"
+    range 1 223
+    default 10
+
+config OBU_LORAWAN_MAX_FRAME_BYTES
+    int "Maximum raw C-ITS frame forwarded"
+    range 64 512
+    default 512
+    help
+        Larger 802.11p frames are dropped rather than truncated. OpenTrafficMap
+        must receive the original frame bytes intact.
+
+config OBU_LORAWAN_FRAGMENT_DATA_BYTES
+    int "Raw bytes per LoRaWAN fragment"
+    range 8 32
+    default 32
+    help
+        The BicycleOBU fragment header is 12 bytes. A 32-byte data fragment
+        therefore creates a 44-byte LoRaWAN application payload, conservative
+        enough for low EU868 data rates.
+
+config OBU_LORAWAN_QUEUE_DEPTH
+    int "Pending raw-frame queue depth"
+    range 1 8
+    default 4
+
+endmenu
+
+menu "Airtime and retry scheduling"
+    depends on OBU_LORAWAN_ENABLE
+
+config OBU_LORAWAN_MIN_FRAGMENT_INTERVAL_MS
+    int "Minimum delay between fragment uplinks (ms)"
+    range 1000 600000
+    default 10000
+    help
+        This is an additional application-side throttle. RadioLib LoRaWAN duty
+        cycle handling remains enabled and is the authoritative regulatory gate.
+
+config OBU_LORAWAN_JOIN_RETRY_MS
+    int "Delay after an actual OTAA failure (ms)"
+    range 5000 600000
+    default 60000
+    help
+        Delay after an OTAA exchange fails. Duty-cycle restrictions are handled
+        separately using RadioLib timeUntilUplink() and are not counted as join
+        failures.
+
+endmenu
+
+menu "Diagnostics"
+    depends on OBU_LORAWAN_ENABLE
+
+config OBU_LORAWAN_DEBUG
+    bool "Enable structured LoRaWAN ESP_LOG diagnostics"
+    default n
+    help
+        Add structured radio/join diagnostics through ESP_LOG, including radio
+        control-line state, join duration, RadioLib status names, timing and
+        persistence state. Root keys are never printed.
+
+config OBU_LORAWAN_RADIOLIB_PROTOCOL_DEBUG
+    bool "Enable RadioLib basic + protocol trace (RLB_DBG/RLB_PRO)"
+    depends on OBU_LORAWAN_DEBUG
     default y
     help
-        Internal guard for the direct OpenTrafficMap uploader fallback DNS.
-        OBU_OTM_DIRECT_ENABLE selects this option so an existing generated
-        sdkconfig cannot accidentally leave DNS fallback disabled.
+        Compile RadioLib with RADIOLIB_DEBUG_BASIC and
+        RADIOLIB_DEBUG_PROTOCOL. This is the trace requested by RadioLib
+        maintainers for LoRaWAN receive-window failures. It is verbose and may
+        expose protocol identifiers/raw frames; review logs before sharing.
 
-config OBU_DNS_FALLBACK_IPV4
-    string "Fallback DNS IPv4 address"
-    depends on OBU_DNS_FALLBACK_ENABLE
-    default "1.1.1.1"
-    help
-        IPv4 address used for ESP_NETIF_DNS_FALLBACK. DHCP continues to control
-        the main and backup DNS servers; this address is used only as the
-        fallback resolver when the network-provided resolver is unavailable.
-
-config OBU_OTM_TLS_TRACE
-    bool "Enable verbose OpenTrafficMap TLS handshake tracing"
-    depends on OBU_OTM_DIRECT_ENABLE
+config OBU_LORAWAN_RADIOLIB_SPI_DEBUG
+    bool "Enable RadioLib full SPI trace (RLB_SPI, extremely verbose)"
+    depends on OBU_LORAWAN_DEBUG
     default n
-    select MBEDTLS_DEBUG
     help
-        Enable ESP-IDF/mbedTLS internal TLS handshake tracing while diagnosing
-        OpenTrafficMap broker connection failures. ESP-TLS automatically hooks
-        the mbedTLS debug callback when MBEDTLS_DEBUG is selected. This is noisy
-        development instrumentation and should only be enabled explicitly for
-        short diagnostic captures.
+        Compile RadioLib with RADIOLIB_DEBUG_SPI. Enable only for a short
+        diagnostic capture when protocol tracing is insufficient; the output is
+        extremely large and can perturb timing if left enabled unnecessarily.
 
-config OBU_WIFI_SSID
-    string "Development Wi-Fi SSID"
-    default ""
+endmenu
 
-config OBU_WIFI_PASSWORD
-    string "Development Wi-Fi password"
-    default ""
-
-config OBU_OTM_NODE_ID
-    string "OpenTrafficMap node id"
-    default "bicycleobu-prototype"
+endmenu
 
 endmenu
