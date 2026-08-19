@@ -14,7 +14,7 @@ from dataclasses import dataclass
 
 import paho.mqtt.client as mqtt
 
-from protocol import FragmentError, Reassembler
+from protocol import FragmentError, Reassembler, parse_fragment
 
 
 LOG = logging.getLogger("lorawan_otm_bridge")
@@ -85,6 +85,7 @@ class Bridge:
             protocol=mqtt.MQTTv311,
         )
         self.otm.tls_set()
+        self.otm.reconnect_delay_set(min_delay=1, max_delay=60)
         self.otm.will_set(self.status_topic, payload="offline", qos=0, retain=True)
         self.otm.on_connect = self._on_otm_connect
         self.otm.on_disconnect = self._on_disconnect
@@ -96,6 +97,7 @@ class Bridge:
         )
         self.tts.username_pw_set(config.tts_username, config.tts_password)
         self.tts.tls_set()
+        self.tts.reconnect_delay_set(min_delay=1, max_delay=60)
         self.tts.on_connect = self._on_tts_connect
         self.tts.on_disconnect = self._on_disconnect
         self.tts.on_message = self._on_tts_message
@@ -170,6 +172,16 @@ class Bridge:
                 return
 
             payload = base64.b64decode(uplink["frm_payload"], validate=True)
+            fragment = parse_fragment(payload)
+            LOG.info(
+                "received LoRaWAN fragment: device=%s frame=%u fragment=%u/%u payload_bytes=%d",
+                device_id,
+                fragment.frame_sequence,
+                fragment.fragment_index + 1,
+                fragment.fragment_count,
+                len(payload),
+            )
+
             frame = self.reassembler.add(device_id, payload)
             if frame is None:
                 return
@@ -192,6 +204,16 @@ class Bridge:
             LOG.warning("discarding malformed LoRaWAN uplink: %s", exc)
 
     def run(self) -> None:
+        LOG.info(
+            "bridge config: tts=%s:%d topic=%s otm=%s:%d packet_topic=%s",
+            self.config.tts_host,
+            self.config.tts_port,
+            self.tts_topic,
+            self.config.otm_host,
+            self.config.otm_port,
+            self.packet_topic,
+        )
+
         LOG.info("connecting OpenTrafficMap MQTT %s:%d", self.config.otm_host, self.config.otm_port)
         self.otm.connect(self.config.otm_host, self.config.otm_port, keepalive=60)
         self.otm.loop_start()
