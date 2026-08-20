@@ -8,6 +8,16 @@ idf_component_register(
 
 target_compile_features(${COMPONENT_LIB} PRIVATE cxx_std_17)
 
+# OBU_LORAWAN_UPLINK_DATARATE lives below a menu that depends on
+# OBU_LORAWAN_ENABLE. Kconfig therefore omits the CONFIG_* macro completely in
+# the normal S3 build where the optional LoRaWAN feature is disabled, even
+# though this component is still compiled. Supply an inert compile-time
+# fallback for that disabled-feature build. When LoRaWAN is enabled, the real
+# Kconfig value is defined and this fallback is not applied.
+if(NOT DEFINED CONFIG_OBU_LORAWAN_UPLINK_DATARATE)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE CONFIG_OBU_LORAWAN_UPLINK_DATARATE=5)
+endif()
+
 # RadioLib debug switches are compile-time options in BuildOpt.h. Apply the
 # selected definitions both to RadioLib itself and to this component so every
 # translation unit sees a consistent debug configuration.
