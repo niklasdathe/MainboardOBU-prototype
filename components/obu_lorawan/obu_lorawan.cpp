@@ -44,6 +44,12 @@ static constexpr const char *RADIOLIB_SPI_DEBUG_STATE = "on";
 static constexpr const char *RADIOLIB_SPI_DEBUG_STATE = "off";
 #endif
 
+#ifdef CONFIG_OBU_LORAWAN_ADR_ENABLE
+static constexpr const char *UPLINK_RATE_POLICY = "ADR";
+#else
+static constexpr const char *UPLINK_RATE_POLICY = "fixed";
+#endif
+
 typedef struct {
     uint16_t len;
     uint8_t data[OBU_LORAWAN_MAX_FRAME_BYTES_LIMIT];
@@ -58,6 +64,7 @@ struct obu_lorawan {
     SX1262 *radio = nullptr;
     LoRaWANNode *node = nullptr;
     bool radio_ready = false;
+    bool uplink_policy_applied = false;
     uint16_t frame_sequence = 0;
     obu_lorawan_stats_t stats = {};
     portMUX_TYPE stats_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -200,6 +207,36 @@ static bool credentials_valid(const obu_lorawan_config_t *c,
            parse_hex_bytes(c->app_key_hex, app_key, 16);
 }
 
+static bool apply_uplink_rate_policy(obu_lorawan_t *u)
+{
+    if (u == nullptr || u->node == nullptr || !u->node->isActivated()) return false;
+    if (u->uplink_policy_applied) return true;
+
+#ifdef CONFIG_OBU_LORAWAN_ADR_ENABLE
+    u->node->setADR(true);
+    u->uplink_policy_applied = true;
+    ESP_LOGI(TAG,
+             "LoRaWAN application rate policy: ADR enabled; network controls uplink data rate");
+#else
+    u->node->setADR(false);
+    const int16_t state = u->node->setDatarate(CONFIG_OBU_LORAWAN_UPLINK_DATARATE);
+    if (state != RADIOLIB_ERR_NONE) {
+        ESP_LOGE(TAG,
+                 "LoRaWAN fixed application data-rate setup failed: DR%u state=%d (%s)",
+                 (unsigned)CONFIG_OBU_LORAWAN_UPLINK_DATARATE,
+                 (int)state,
+                 radiolib_state_name(state));
+        return false;
+    }
+    u->uplink_policy_applied = true;
+    ESP_LOGI(TAG,
+             "LoRaWAN application rate policy: fixed EU868 DR%u (ADR disabled), max_payload_now=%u bytes",
+             (unsigned)CONFIG_OBU_LORAWAN_UPLINK_DATARATE,
+             (unsigned)u->node->getMaxPayloadLen());
+#endif
+    return true;
+}
+
 static bool ensure_radio(obu_lorawan_t *u)
 {
     if (u->radio_ready) return true;
@@ -305,8 +342,8 @@ static bool ensure_radio(obu_lorawan_t *u)
     /*
      * JoinRequest data rate is a local pre-activation choice. Do not overwrite
      * receive/data-rate state restored from an already valid session. For a
-     * new/pending OTAA activation, set the requested EU868 DR while ADR is off,
-     * then enable ADR for normal network-controlled operation.
+     * new/pending OTAA activation, set the requested join DR with ADR off.
+     * The operational application policy is applied after activation.
      */
     if (!restored_session) {
         u->node->setADR(false);
@@ -323,12 +360,16 @@ static bool ensure_radio(obu_lorawan_t *u)
                   (unsigned)u->config.join_datarate);
     }
 
-    u->node->setADR(true);
+    /* Legal EU868 duty-cycle handling is never disabled by the throughput profile. */
     u->node->setDutyCycle(true);
+
+    if (restored_session && !apply_uplink_rate_policy(u)) {
+        return false;
+    }
 
     u->radio_ready = true;
     ESP_LOGI(TAG,
-             "Wio-SX1262 ready on shared SPI%d: SCK=%d MISO=%d MOSI=%d NSS=%d DIO1=%d RESET=%d BUSY=%d RF_SW1=%u TCXO=%.1fV persisted_nonces=%s restored_session=%s join_dr=%u",
+             "Wio-SX1262 ready on shared SPI%d: SCK=%d MISO=%d MOSI=%d NSS=%d DIO1=%d RESET=%d BUSY=%d RF_SW1=%u TCXO=%.1fV persisted_nonces=%s restored_session=%s join_dr=%u uplink_policy=%s",
              (int)u->config.host,
              u->config.sck_gpio, u->config.miso_gpio, u->config.mosi_gpio,
              u->config.nss_gpio, u->config.dio1_gpio,
@@ -336,11 +377,13 @@ static bool ensure_radio(obu_lorawan_t *u)
              (unsigned)SEEED_WIO_RF_SW1_GPIO, (double)SEEED_WIO_TCXO_VOLTAGE,
              restored_persistence ? "yes" : "no",
              restored_session ? "yes" : "no",
-             (unsigned)u->config.join_datarate);
-    LORA_DIAG("OTAA configured for EU868: JoinEUI=%s DevEUI=%s initial_join_DR=%u; root keys intentionally not logged",
+             (unsigned)u->config.join_datarate,
+             UPLINK_RATE_POLICY);
+    LORA_DIAG("OTAA configured for EU868: JoinEUI=%s DevEUI=%s initial_join_DR=%u uplink_policy=%s; root keys intentionally not logged",
               u->config.join_eui_hex,
               u->config.dev_eui_hex,
-              (unsigned)u->config.join_datarate);
+              (unsigned)u->config.join_datarate,
+              UPLINK_RATE_POLICY);
     return true;
 }
 
@@ -348,6 +391,7 @@ static bool ensure_joined(obu_lorawan_t *u)
 {
     if (u->node == nullptr) return false;
     if (u->node->isActivated()) {
+        if (!apply_uplink_rate_policy(u)) return false;
         stats_set_joined(u, true);
         return true;
     }
@@ -403,6 +447,10 @@ static bool ensure_joined(obu_lorawan_t *u)
         stats_inc(&u->stats.join_attempts, &u->stats_lock);
         if (state == RADIOLIB_LORAWAN_NEW_SESSION ||
             state == RADIOLIB_LORAWAN_SESSION_RESTORED) {
+            if (!apply_uplink_rate_policy(u)) {
+                stats_set_joined(u, false);
+                return false;
+            }
             stats_set_joined(u, true);
             if (state == RADIOLIB_LORAWAN_NEW_SESSION) {
                 stats_set_link_metrics(u);
@@ -475,11 +523,41 @@ static int16_t send_payload_when_allowed(obu_lorawan_t *u,
 
 static bool send_frame(obu_lorawan_t *u, const queued_frame_t *frame)
 {
-    const uint8_t data_bytes = u->config.fragment_data_bytes;
+    const uint8_t max_payload_len = u->node->getMaxPayloadLen();
+    if (max_payload_len <= FRAG_HEADER_BYTES) {
+        stats_inc(&u->stats.tx_errors, &u->stats_lock);
+        ESP_LOGE(TAG,
+                 "LoRaWAN active MAC state cannot fit the %u-byte fragment header: max_payload=%u",
+                 (unsigned)FRAG_HEADER_BYTES,
+                 (unsigned)max_payload_len);
+        return false;
+    }
+
+    const uint8_t radio_data_limit = (uint8_t)(max_payload_len - FRAG_HEADER_BYTES);
+    const uint8_t data_bytes =
+        u->config.fragment_data_bytes < radio_data_limit
+            ? u->config.fragment_data_bytes
+            : radio_data_limit;
     const uint8_t fragment_count =
         (uint8_t)((frame->len + data_bytes - 1U) / data_bytes);
     const uint16_t crc = crc16_ccitt(frame->data, frame->len);
     const uint16_t frame_sequence = u->frame_sequence++;
+
+    if (data_bytes != u->config.fragment_data_bytes) {
+        ESP_LOGI(TAG,
+                 "LoRaWAN fragment payload clamped by active MAC/data rate: configured_raw=%u effective_raw=%u max_application_payload=%u",
+                 (unsigned)u->config.fragment_data_bytes,
+                 (unsigned)data_bytes,
+                 (unsigned)max_payload_len);
+    }
+
+    ESP_LOGI(TAG,
+             "LoRaWAN raw frame TX start: frame=%u bytes=%u fragments=%u raw_per_fragment=%u max_application_payload=%u",
+             (unsigned)frame_sequence,
+             (unsigned)frame->len,
+             (unsigned)fragment_count,
+             (unsigned)data_bytes,
+             (unsigned)max_payload_len);
 
     uint8_t payload[FRAG_HEADER_BYTES + OBU_LORAWAN_MAX_FRAGMENT_DATA_BYTES];
     for (uint8_t fragment_index = 0; fragment_index < fragment_count; ++fragment_index) {
@@ -515,6 +593,7 @@ static bool send_frame(obu_lorawan_t *u, const queued_frame_t *frame)
                      radiolib_state_name(state));
             if (state == RADIOLIB_ERR_NETWORK_NOT_JOINED) {
                 stats_set_joined(u, false);
+                u->uplink_policy_applied = false;
             }
             return false;
         }
@@ -532,7 +611,8 @@ static bool send_frame(obu_lorawan_t *u, const queued_frame_t *frame)
                   (int)state,
                   radiolib_state_name(state));
 
-        if (fragment_index + 1U < fragment_count) {
+        if (fragment_index + 1U < fragment_count &&
+            u->config.min_fragment_interval_ms > 0) {
             vTaskDelay(pdMS_TO_TICKS(u->config.min_fragment_interval_ms));
         }
     }
@@ -564,7 +644,9 @@ static void uplink_task(void *arg)
 
         if (xQueueReceive(u->queue, &frame, pdMS_TO_TICKS(1000)) != pdTRUE) continue;
         (void)send_frame(u, &frame);
-        vTaskDelay(pdMS_TO_TICKS(u->config.min_fragment_interval_ms));
+        if (u->config.min_fragment_interval_ms > 0) {
+            vTaskDelay(pdMS_TO_TICKS(u->config.min_fragment_interval_ms));
+        }
     }
 }
 
@@ -635,13 +717,26 @@ extern "C" esp_err_t obu_lorawan_start(const obu_lorawan_config_t *config, obu_l
         return ESP_ERR_NO_MEM;
     }
 
+#ifdef CONFIG_OBU_LORAWAN_ADR_ENABLE
     ESP_LOGI(TAG,
-             "LoRaWAN uplink worker started: EU868 join_dr=%u fport=%u max_frame=%u fragment_data=%u queue=%u persistence=NVS",
+             "LoRaWAN uplink worker started: EU868 join_dr=%u application_rate=ADR fport=%u max_frame=%u max_fragment_data=%u queue=%u min_fragment_interval=%u ms persistence=NVS",
              (unsigned)config->join_datarate,
              (unsigned)config->fport,
              (unsigned)config->max_frame_bytes,
              (unsigned)config->fragment_data_bytes,
-             (unsigned)config->queue_depth);
+             (unsigned)config->queue_depth,
+             (unsigned)config->min_fragment_interval_ms);
+#else
+    ESP_LOGI(TAG,
+             "LoRaWAN uplink worker started: EU868 join_dr=%u application_rate=fixed_DR%u fport=%u max_frame=%u max_fragment_data=%u queue=%u min_fragment_interval=%u ms persistence=NVS",
+             (unsigned)config->join_datarate,
+             (unsigned)CONFIG_OBU_LORAWAN_UPLINK_DATARATE,
+             (unsigned)config->fport,
+             (unsigned)config->max_frame_bytes,
+             (unsigned)config->fragment_data_bytes,
+             (unsigned)config->queue_depth,
+             (unsigned)config->min_fragment_interval_ms);
+#endif
     return ESP_OK;
 }
 
