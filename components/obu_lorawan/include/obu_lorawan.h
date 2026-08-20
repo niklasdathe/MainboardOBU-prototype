@@ -38,6 +38,8 @@ typedef struct {
     const char *nwk_key_hex;
     const char *app_key_hex;
     uint8_t join_datarate;
+    bool adr_enabled;
+    uint8_t uplink_datarate;
     uint8_t fport;
     uint16_t max_frame_bytes;
     uint8_t fragment_data_bytes;
