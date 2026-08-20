@@ -1,0 +1,5 @@
+dependencies:
+  RadioLib:
+    git: https://github.com/jgromes/RadioLib.git
+    version: 12e3ed6c4814e177a87a7b2c48ab11dd65788143
+    require: public

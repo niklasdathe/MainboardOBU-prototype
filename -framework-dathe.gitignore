@@ -1,0 +1,12 @@
+build/
+firmware/*/build/
+sdkconfig
+firmware/*/sdkconfig
+.venv/
+__pycache__/
+*.pyc
+.env
+*.pcap
+.DS_Store
+.vscode/settings.json
+.vscode/settings-DesktopCaspar.json

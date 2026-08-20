@@ -1,0 +1,107 @@
+name: ESP-IDF build
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate-hardware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate hardware profiles
+        run: |
+          python -m pip install --disable-pip-version-check pyyaml
+          python scripts/check_pin_plan.py config/hardware/prototype-expansion-base.yaml
+          python scripts/check_pin_plan.py config/hardware/round-display-carrier.yaml
+
+  bridge-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test LoRaWAN OpenTrafficMap bridge
+        working-directory: tools/lorawan_otm_bridge
+        run: |
+          python -m pip install --disable-pip-version-check -r requirements.txt
+          python -m unittest discover -s tests -v
+          python -m py_compile protocol.py bridge.py
+          python -c "import bridge"
+      - name: Build LoRaWAN OpenTrafficMap bridge container
+        working-directory: tools/lorawan_otm_bridge
+        run: docker build -t bicycleobu-lorawan-otm-bridge:test .
+
+  build-c5:
+    runs-on: ubuntu-latest
+    container: espressif/idf:v6.0.2
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify ESP-IDF 6.0.2
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          idf.py --version
+      - name: Build ESP32-C5 firmware
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          idf.py -C firmware/c5 set-target esp32c5
+          idf.py -C firmware/c5 build
+
+  build-c5-tx:
+    runs-on: ubuntu-latest
+    container: espressif/idf:v6.0.2
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify ESP-IDF 6.0.2
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          idf.py --version
+      - name: Test VAM UPER encoder
+        shell: bash
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror \
+            -Ifirmware/c5-tx/main \
+            firmware/c5-tx/main/vam_encoder.c \
+            firmware/c5-tx/tests/vam_encoder_test.c \
+            -o /tmp/vam_encoder_test
+          /tmp/vam_encoder_test
+      - name: Build standalone ESP32-C5 TX firmware
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          idf.py -C firmware/c5-tx set-target esp32c5
+          idf.py -C firmware/c5-tx build
+
+  build-s3:
+    runs-on: ubuntu-latest
+    container: espressif/idf:v6.0.2
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify ESP-IDF 6.0.2
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          idf.py --version
+      - name: Build ESP32-S3 firmware
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          idf.py -C firmware/s3 set-target esp32s3
+          idf.py -C firmware/s3 build
+
+  build-s3-lorawan:
+    runs-on: ubuntu-latest
+    container: espressif/idf:v6.0.2
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify ESP-IDF 6.0.2
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          idf.py --version
+      - name: Build ESP32-S3 firmware with Wio-SX1262 uplink enabled
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          idf.py -C firmware/s3 -D 'SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.ci.lorawan.defaults' set-target esp32s3
+          idf.py -C firmware/s3 build
