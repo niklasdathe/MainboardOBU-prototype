@@ -16,129 +16,71 @@ static esp_err_t cmd(ssd_t*s,uint8_t c){uint8_t b[2]={0,c};return i2c_master_tra
 static void text(ssd_t*s,int x,int page,const char*str){while(*str&&x<122){char c=*str++;if(c>='a'&&c<='z')c-=32;if(c<' '||c>'Z')c=' ';const uint8_t*g=font[c-' '];for(int i=0;i<5;i++)s->fb[page*128+x++]=g[i];s->fb[page*128+x++]=0;}}
 static esp_err_t flush(ssd_t*s){for(int p=0;p<8;p++){cmd(s,0xb0|p);cmd(s,0x00);cmd(s,0x10);uint8_t b[129];b[0]=0x40;memcpy(b+1,s->fb+p*128,128);esp_err_t e=i2c_master_transmit(s->dev,b,sizeof(b),100);if(e!=ESP_OK)return e;}return ESP_OK;}
 
-static const char *v2x_signal_quality(int rssi_dbm)
-{
-    if (rssi_dbm >= -65) return "STRONG";
-    if (rssi_dbm >= -80) return "GOOD";
-    if (rssi_dbm >= -95) return "WEAK";
-    return "POOR";
-}
-
-static const char *lora_signal_quality(float rssi_dbm)
-{
-    if (rssi_dbm >= -85.0f) return "STRONG";
-    if (rssi_dbm >= -105.0f) return "GOOD";
-    if (rssi_dbm >= -120.0f) return "WEAK";
-    return "POOR";
-}
-
-static void format_link_age(char *out, size_t out_len, uint32_t age_ms)
-{
-    if (age_ms == 0xffffffffU) {
-        snprintf(out, out_len, "NO DATA");
-    } else if (age_ms < 1000U) {
-        snprintf(out, out_len, "%luMS", (unsigned long)age_ms);
-    } else if (age_ms < 10000U) {
-        snprintf(out, out_len, "%.1FS", (double)age_ms / 1000.0);
-    } else {
-        snprintf(out, out_len, "%luS", (unsigned long)(age_ms / 1000U));
-    }
-}
-
 static esp_err_t render(obu_display_driver_t*d,const obu_hmi_model_t*m)
 {
     ssd_t*s=d->ctx;
     if(!s->enabled)return ESP_OK;
     memset(s->fb,0,sizeof(s->fb));
     char b[32];
-    char age[12];
-    format_link_age(age,sizeof(age),m->c5_last_age_ms);
 
-    /* C5 controller and 5.9 GHz radio */
-    if(m->c5_message_count==0){
-        snprintf(b,sizeof(b),"C5 WAITING FOR LINK");
-    }else if(m->c5_last_age_ms>3000U){
-        snprintf(b,sizeof(b),"C5 STALE %s",age);
-    }else if(m->c5_online){
-        snprintf(b,sizeof(b),"C5 OK RADIO ON %s",age);
-    }else{
-        snprintf(b,sizeof(b),"C5 OK RADIO OFF");
-    }
-    text(s,0,0,b);
-
-    /* GNSS */
-    snprintf(b,sizeof(b),"GNSS %s",m->gnss_valid?"OK FIX":"SEARCHING");
-    text(s,0,1,b);
-
-    /* V2X receive path */
-    if(!m->c5_online){
-        snprintf(b,sizeof(b),"V2X OFF RADIO OFF");
-    }else if(m->v2x_rx_count==0&&!m->v2x_rx_seen){
-        snprintf(b,sizeof(b),"V2X READY NO RX");
-    }else{
-        const char*type=m->v2x_rx_type[0]?m->v2x_rx_type:"RAW";
-        snprintf(b,sizeof(b),"V2X OK %.6s RX%lu",type,(unsigned long)m->v2x_rx_count);
-    }
-    text(s,0,2,b);
-
-    if(m->v2x_rx_count>0||m->v2x_rx_seen){
-        snprintf(b,sizeof(b),"V2X RF %s %dDBM",
-                 v2x_signal_quality((int)m->v2x_last_rssi_dbm),
-                 (int)m->v2x_last_rssi_dbm);
-    }else{
-        snprintf(b,sizeof(b),"V2X RF NO SIGNAL YET");
-    }
-    text(s,0,3,b);
-
-    /* Optional LoRaWAN uplink */
     if(!m->lorawan_enabled){
         snprintf(b,sizeof(b),"LORA DISABLED");
     }else if(!m->lorawan_ready){
-        snprintf(b,sizeof(b),"LORA START ERROR");
-    }else if(!m->lorawan_joined&&m->lorawan_join_failures>0){
-        snprintf(b,sizeof(b),"LORA RETRYING JOIN");
+        snprintf(b,sizeof(b),"LORA ERROR");
     }else if(!m->lorawan_joined){
         snprintf(b,sizeof(b),"LORA JOINING");
+    }else if(m->lorawan_signal_valid){
+        snprintf(b,sizeof(b),"LORA OK %.0F/%.1FDB",m->lorawan_last_rssi_dbm,m->lorawan_last_snr_db);
     }else{
-        snprintf(b,sizeof(b),"LORA OK JOINED");
+        snprintf(b,sizeof(b),"LORA OK RX --");
     }
+    text(s,0,0,b);
+
+    if(m->lorawan_enabled){
+        snprintf(b,sizeof(b),"LTX %lu E%lu J%lu/%lu",
+                 (unsigned long)m->lorawan_frames_sent,
+                 (unsigned long)m->lorawan_tx_errors,
+                 (unsigned long)m->lorawan_join_attempts,
+                 (unsigned long)m->lorawan_join_failures);
+        text(s,0,1,b);
+    }
+
+    if(m->v2x_rx_count>0||m->v2x_rx_seen){
+        const char*type=m->v2x_rx_type[0]?m->v2x_rx_type:"RAW";
+        snprintf(b,sizeof(b),"V2X %lu %.6s",(unsigned long)m->v2x_rx_count,type);
+        text(s,0,2,b);
+        snprintf(b,sizeof(b),"VRX %dDBM %uM",(int)m->v2x_last_rssi_dbm,(unsigned)m->v2x_last_frequency_mhz);
+        text(s,0,3,b);
+    }else{
+        text(s,0,2,"V2X 0 --");
+        text(s,0,3,"VRX --DBM ----M");
+    }
+
+    snprintf(b,sizeof(b),"C5 %s GNSS %s",m->c5_online?"OK":"OFF",m->gnss_valid?"FIX":"NO");
     text(s,0,4,b);
 
-    if(m->lorawan_joined&&m->lorawan_signal_valid){
-        snprintf(b,sizeof(b),"LORA RF %s %.0FDBM",
-                 lora_signal_quality(m->lorawan_last_rssi_dbm),
-                 (double)m->lorawan_last_rssi_dbm);
-    }else if(m->lorawan_joined){
-        snprintf(b,sizeof(b),"LORA RF NO DOWNLINK");
+    if(m->c5_message_count==0||m->c5_last_age_ms==0xffffffffU){
+        snprintf(b,sizeof(b),"C5MSG %lu AGE --",(unsigned long)m->c5_message_count);
     }else{
-        snprintf(b,sizeof(b),"LORA RF WAITING");
+        snprintf(b,sizeof(b),"C5MSG %lu A%luMS",
+                 (unsigned long)m->c5_message_count,
+                 (unsigned long)m->c5_last_age_ms);
     }
     text(s,0,5,b);
 
-    if(!m->lorawan_enabled){
-        snprintf(b,sizeof(b),"UPLINK DISABLED");
-    }else if(!m->lorawan_joined){
-        snprintf(b,sizeof(b),"UPLINK WAITING");
-    }else if(m->lorawan_tx_errors>0){
-        snprintf(b,sizeof(b),"UPLINK ERROR E%lu T%lu",
-                 (unsigned long)m->lorawan_tx_errors,
-                 (unsigned long)m->lorawan_frames_sent);
+    if(m->glosa_valid){
+        snprintf(b,sizeof(b),"GLOSA %.1F KMH",m->glosa_target_kmh);
+        text(s,0,6,b);
+        snprintf(b,sizeof(b),"PHONE %s",m->phone_connected?"OK":"OFF");
+        if(m->warning==OBU_HMI_WARN_NONE)text(s,0,7,b);
     }else{
-        snprintf(b,sizeof(b),"UPLINK OK TX%lu",
-                 (unsigned long)m->lorawan_frames_sent);
+        snprintf(b,sizeof(b),"PHONE %s",m->phone_connected?"OK":"OFF");
+        text(s,0,6,b);
     }
-    text(s,0,6,b);
 
-    /* Highest-priority user-facing state occupies the last row. */
     if(m->warning!=OBU_HMI_WARN_NONE){
-        snprintf(b,sizeof(b),"ALERT %.14s",m->warning_text[0]?m->warning_text:"WARNING");
-    }else if(m->glosa_valid){
-        snprintf(b,sizeof(b),"PHONE %s GLOSA ON",m->phone_connected?"OK":"OFF");
-    }else{
-        snprintf(b,sizeof(b),"PHONE %s GLOSA OFF",m->phone_connected?"OK":"OFF");
+        text(s,0,7,m->warning_text[0]?m->warning_text:"WARNING");
     }
-    text(s,0,7,b);
-
     return flush(s);
 }
 
