@@ -19,7 +19,15 @@ The bridge reconstructs the original raw frame and publishes it as binary. It do
 
 ## Current verified state
 
-Physical testing has demonstrated a valid LoRaWAN session being persisted and restored after a normal firmware reflash:
+The physical end-to-end path has now been demonstrated, including complete frame reassembly and OpenTrafficMap publication. The bridge has logged complete examples such as:
+
+```text
+published C-ITS frame to OpenTrafficMap: device=bicycleobu bytes=456 topic=its/bicycleobu-70b3d57ed0078c82/packet
+published C-ITS frame to OpenTrafficMap: device=bicycleobu bytes=314 topic=its/bicycleobu-70b3d57ed0078c82/packet
+published C-ITS frame to OpenTrafficMap: device=bicycleobu bytes=225 topic=its/bicycleobu-70b3d57ed0078c82/packet
+```
+
+Physical testing has also demonstrated:
 
 ```text
 nonce_state=present session_state=present
@@ -28,9 +36,7 @@ RADIOLIB_LORAWAN_SESSION_RESTORED (-1117)
 activated=yes
 ```
 
-The latest Network Server MAC-state export proves that the active session is also receiving application uplinks over the network. The server has accepted multiple `UNCONFIRMED_UP` frames on FPort 10 with FCnt values including 0, 1, 2, 3, 10, 11, 12 and 13. These were heard through both Packet Broker and a current eu1 gateway (`eui-a840411f3ff64150`). Therefore the current blocker is no longer SX1262 TX or gateway reception.
-
-The remaining gap is between Network Server acceptance and the Application Server/streaming layer used by Console Live Data and the MQTT bridge. The next diagnostic is to subscribe directly to the TTS Application Server MQTT topic and determine whether application uplinks are being forwarded there.
+and TTS Network Server reception of multiple unconfirmed FPort-10 uplinks through both Packet Broker and a current eu1 gateway.
 
 See [`LORAWAN_OTAA_DEBUG.md`](LORAWAN_OTAA_DEBUG.md) only if activation stops working again.
 
@@ -71,7 +77,24 @@ FPort:       10
 
 Root keys are secrets and must match TTS exactly; do not commit them.
 
-DR0/SF12 is useful for controlled coverage diagnostics but is extremely slow for multi-fragment application traffic. The current firmware enables ADR after activation. Before treating this as a final mobile bicycle profile, revisit ADR/data-rate policy: moving devices experience rapidly changing RF conditions, so a configurable mobile-oriented non-ADR profile is preferable to blindly relying on stationary-device ADR behavior.
+### Throughput-oriented defaults
+
+The application uplink now defaults to the fastest data rate that every currently configured TTS uplink channel supports:
+
+```text
+JoinRequest DR:             DR3 / SF9 BW125
+Application uplink policy: fixed DR5 / SF7 BW125
+ADR:                        disabled
+Configured raw fragment:    up to 230 bytes
+Extra fragment delay:       0 ms
+RadioLib duty cycle:        enabled
+```
+
+The join data rate remains separate from the application rate so OTAA can use a more coverage-balanced DR without forcing slow application traffic afterward.
+
+`OBU_LORAWAN_ADR_ENABLE` can be enabled to return application data-rate control to the network. When ADR is disabled, `OBU_LORAWAN_UPLINK_DATARATE` selects DR0..DR5 and defaults to DR5. For a moving bicycle, fixed DR5 is useful as the maximum-throughput experiment; reduce it when the RF link cannot sustain SF7.
+
+The current TTS MAC state advertises `max_data_rate_index=5` on the active uplink channels, so DR5 is the fastest rate used by this default profile. DR6/DR7 are not forced onto a session whose active channels are limited to DR5.
 
 ### Hardware pins
 
@@ -107,9 +130,44 @@ whole-frame CRC16-CCITT
 fragment data
 ```
 
-The default fragment data size is 32 bytes and the application FPort is 10. Multiple LoRaWAN uplinks are normally required for one ITS-G5 frame.
+The fragment protocol header remains 12 bytes. The configured raw-fragment ceiling is now 230 bytes instead of 32 bytes. Before each frame, the worker calls RadioLib `getMaxPayloadLen()` and automatically clamps the raw fragment size to:
 
-The latest physical application test used a 314-byte C5 frame, producing 10 fragments. Fragment 1/10 was locally transmitted at DR0/SF12 with about 2.629 seconds of airtime, followed by a reported duty-cycle wait of about 258 seconds before fragment 2. That is suitable as a coverage diagnostic, not as a useful sustained OTM throughput profile.
+```text
+min(configured raw fragment bytes,
+    RadioLib maximum application payload - 12-byte BicycleOBU header)
+```
+
+This keeps lower configured data rates valid while allowing DR5 to use the full available application payload. In the pinned RadioLib EU868 definition, DR5 permits a 242-byte payload, so the maximum-throughput case is 12 bytes of BicycleOBU header plus 230 bytes of raw C-ITS data.
+
+### Measured baseline before throughput optimization
+
+The previous 32-byte raw fragment setting produced roughly one byte per second of reconstructed C-ITS payload in the physical test. Representative complete frames were:
+
+| Raw C-ITS frame | Old fragments | First -> final fragment | Approx. reconstructed rate |
+| ---: | ---: | ---: | ---: |
+| 456 B | 15 | ~459.7 s | ~0.99 B/s |
+| 314 B | 10 | ~281.6 s | ~1.12 B/s |
+| 225 B | 8 | ~241.2 s | ~0.93 B/s |
+
+With a 230-byte raw fragment ceiling at DR5, the same sizes require only:
+
+```text
+456 B -> 2 LoRaWAN uplinks
+314 B -> 2 LoRaWAN uplinks
+225 B -> 1 LoRaWAN uplink
+```
+
+This removes most of the fragmentation overhead and substantially reduces the probability that one missing LoRaWAN fragment prevents reconstruction of an entire C-ITS frame.
+
+The firmware does **not** disable EU868 duty-cycle enforcement in order to achieve these numbers. Legal airtime remains the dominant hard limit after the fragment/data-rate optimization.
+
+## Is LoRaWAN suitable for this path?
+
+This optimization is intentionally designed to answer that experimentally. Even at DR5, LoRaWAN remains a low-bandwidth link and cannot losslessly mirror normal ITS-G5 reception rates. A continuous raw V2X feed should therefore not be assumed to be a viable LoRaWAN product architecture.
+
+The useful cases are more likely to be sparse research sampling, selected message forwarding, event-triggered packets, or sending compact derived observations rather than every received raw ITS-G5 frame.
+
+When using the public The Things Network rather than a private LoRaWAN network, its separate fair-use policy must also be respected. The maximum-throughput profile is for controlled evaluation, not permission to bypass network or regulatory airtime limits.
 
 ## The Things Stack MQTT
 
@@ -132,8 +190,6 @@ Uplink topic:    v3/bicycleobu@ttn/devices/bicycleobu/up
 ```
 
 The bridge reads `uplink_message.frm_payload`, base64-decodes it, filters FPort 10 and reassembles by device/frame sequence.
-
-The Network Server MAC-state view is not the same as an Application Server uplink stream. The NS can accept a valid LoRaWAN frame and retain its encrypted FRMPayload while the bridge still sees nothing if that uplink is not being forwarded through the Application Server. When diagnosing this boundary, subscribe directly to `v3/bicycleobu@ttn/devices/+/up`; if that stream is empty while NS FCnt continues to advance, investigate the device's Application Server registration/session binding rather than RF.
 
 ## OpenTrafficMap MQTT
 
@@ -165,7 +221,7 @@ The bridge is intended to run permanently on an Ubuntu home server. It needs no 
 ```bash
 git clone https://github.com/niklasdathe/MainboardOBU-prototype.git
 cd MainboardOBU-prototype
-git switch agent/lorawan-otm-uplink
+git switch main
 git pull --ff-only
 cd tools/lorawan_otm_bridge
 
@@ -195,18 +251,17 @@ docker compose up -d --build
 
 The full operator guide is [`../tools/lorawan_otm_bridge/README.md`](../tools/lorawan_otm_bridge/README.md).
 
-## End-to-end test now
+## Throughput test procedure
 
 Do not erase the S3 flash/NVS. A normal firmware reflash preserves the current LoRaWAN session.
 
-1. Keep the Docker bridge running and confirm both MQTT connections.
-2. Receive actual ITS-G5 traffic on the C5.
-3. Confirm the S3 reports `C5 V2X RX` and a fragment transmission.
-4. Confirm Network Server MAC state FCnt advances for FPort-10 uplinks.
-5. Subscribe directly to the TTS Application Server MQTT `.../devices/+/up` topic. If NS FCnt advances but MQTT stays empty, debug the NS -> AS/session binding.
-6. Once TTS application MQTT receives fragments, confirm the bridge logs each accepted fragment.
-7. Wait for a complete frame and confirm `published C-ITS frame to OpenTrafficMap`.
-8. Check OpenTrafficMap for the decoded traffic represented by the forwarded frame.
+1. Build the S3 with the maximum-throughput defaults or select fixed DR5 manually in menuconfig.
+2. Keep the Docker bridge running and confirm both MQTT connections.
+3. Receive actual ITS-G5 traffic on the C5.
+4. Confirm the S3 startup log reports `application rate policy: fixed EU868 DR5` and a current maximum payload near the DR5 value.
+5. Confirm a raw frame TX start reports the reduced fragment count and effective raw bytes per fragment.
+6. Measure from the first bridge fragment to `published C-ITS frame to OpenTrafficMap`.
+7. Compare reconstructed bytes/second and complete-frame success rate with the baseline table above.
 
 ## Persistence rule
 

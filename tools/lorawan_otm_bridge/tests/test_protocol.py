@@ -41,6 +41,15 @@ class ProtocolTests(unittest.TestCase):
         self.assertIsNone(r.add("bike", fragments[3], now=4))
         self.assertEqual(r.add("bike", fragments[1], now=5), frame)
 
+    def test_reassembles_dr5_maximum_raw_chunk(self):
+        frame = bytes((i % 251 for i in range(456)))
+        fragments = make_fragments(frame, chunk=230)
+        self.assertEqual(len(fragments), 2)
+        self.assertEqual(len(fragments[0]), 242)
+        r = Reassembler()
+        self.assertIsNone(r.add("bike", fragments[0], now=1))
+        self.assertEqual(r.add("bike", fragments[1], now=2), frame)
+
     def test_crc_failure_discards_complete_frame(self):
         frame = b"hello world" * 5
         fragments = make_fragments(frame)

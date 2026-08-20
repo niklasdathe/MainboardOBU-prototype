@@ -9,6 +9,13 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 # resolution so the Class A RX1/RX2 windows can be opened reliably.
 CONFIG_FREERTOS_HZ=1000
 
+# Maximum-throughput LoRaWAN application defaults. OTAA uses its separate join
+# data rate. Regulatory EU868 duty-cycle handling remains enabled in RadioLib.
+# CONFIG_OBU_LORAWAN_ADR_ENABLE is not set
+CONFIG_OBU_LORAWAN_UPLINK_DATARATE=5
+CONFIG_OBU_LORAWAN_FRAGMENT_DATA_BYTES=230
+CONFIG_OBU_LORAWAN_MIN_FRAGMENT_INTERVAL_MS=0
+
 # The S3 hub links FAT/SD, GNSS/time, HMI and warning drivers. Keep the larger
 # single-app development layout for prototype growth; OTA is intentionally not
 # implemented in this prototype firmware yet.

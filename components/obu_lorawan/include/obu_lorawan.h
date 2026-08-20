@@ -14,7 +14,11 @@ extern "C" {
 #define OBU_LORAWAN_FRAGMENT_PROTOCOL_VERSION 1U
 #define OBU_LORAWAN_FRAGMENT_HEADER_BYTES 12U
 #define OBU_LORAWAN_MAX_FRAME_BYTES_LIMIT 512U
-#define OBU_LORAWAN_MAX_FRAGMENT_DATA_BYTES 32U
+/* EU868 DR4/DR5 allow a 242-byte LoRaWAN application payload in RadioLib.
+ * Reserve 12 bytes for the BicycleOBU fragment header, leaving 230 raw bytes.
+ * The worker clamps this further at runtime through getMaxPayloadLen() when a
+ * lower data rate or current MAC state requires a smaller payload. */
+#define OBU_LORAWAN_MAX_FRAGMENT_DATA_BYTES 230U
 
 typedef struct obu_lorawan obu_lorawan_t;
 

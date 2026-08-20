@@ -94,16 +94,36 @@ config OBU_LORAWAN_APP_KEY
     default ""
 
 config OBU_LORAWAN_JOIN_DATARATE
-    int "Initial OTAA uplink data rate (EU868 DR0..DR5)"
+    int "Initial OTAA JoinRequest data rate (EU868 DR0..DR5)"
     range 0 5
     default 3
     help
-        Select the data rate used for JoinRequest uplinks before the network
-        can control the link through ADR. EU868 mapping is DR0=SF12, DR1=SF11,
-        DR2=SF10, DR3=SF9, DR4=SF8 and DR5=SF7, all at 125 kHz. DR3 preserves
-        the previous BicycleOBU behavior. For coverage diagnostics, DR0 gives
-        the largest link budget at the cost of substantially more airtime.
-        ADR remains enabled for normal operation after activation.
+        Select the data rate used only for JoinRequest uplinks before an OTAA
+        session exists. EU868 mapping is DR0=SF12, DR1=SF11, DR2=SF10,
+        DR3=SF9, DR4=SF8 and DR5=SF7, all at 125 kHz. DR3 is retained as a
+        coverage-balanced join default. The application uplink rate is
+        configured separately below.
+
+config OBU_LORAWAN_ADR_ENABLE
+    bool "Enable ADR for application uplinks"
+    default n
+    help
+        Let the LoRaWAN network control application uplink data rate and TX
+        power. Disable this for deterministic throughput testing on the bicycle.
+        With ADR disabled, the fixed application data rate below is applied
+        after both new and restored OTAA sessions.
+
+config OBU_LORAWAN_UPLINK_DATARATE
+    int "Fixed application uplink data rate (EU868 DR0..DR5)"
+    depends on !OBU_LORAWAN_ADR_ENABLE
+    range 0 5
+    default 5
+    help
+        Fixed data rate used for application uplinks when ADR is disabled.
+        DR5 = SF7/BW125 and is the fastest data rate supported by every uplink
+        channel in the current TTS EU868 channel plan, so it is the default for
+        maximum-throughput evaluation. Lower this only when link margin is
+        insufficient.
 
 endmenu
 
@@ -124,13 +144,16 @@ config OBU_LORAWAN_MAX_FRAME_BYTES
         must receive the original frame bytes intact.
 
 config OBU_LORAWAN_FRAGMENT_DATA_BYTES
-    int "Raw bytes per LoRaWAN fragment"
-    range 8 32
-    default 32
+    int "Maximum raw bytes per LoRaWAN fragment"
+    range 8 230
+    default 230
     help
-        The BicycleOBU fragment header is 12 bytes. A 32-byte data fragment
-        therefore creates a 44-byte LoRaWAN application payload, conservative
-        enough for low EU868 data rates.
+        Upper bound for raw C-ITS bytes placed in one LoRaWAN application
+        fragment. The BicycleOBU fragment header is 12 bytes. At EU868 DR5,
+        RadioLib permits a 242-byte application payload, so 230 raw bytes plus
+        the 12-byte header fills the packet. At lower data rates the firmware
+        automatically clamps this value to RadioLib getMaxPayloadLen() so the
+        fragment remains legal for the active MAC/data-rate state.
 
 config OBU_LORAWAN_QUEUE_DEPTH
     int "Pending raw-frame queue depth"
@@ -143,12 +166,13 @@ menu "Airtime and retry scheduling"
     depends on OBU_LORAWAN_ENABLE
 
 config OBU_LORAWAN_MIN_FRAGMENT_INTERVAL_MS
-    int "Minimum delay between fragment uplinks (ms)"
-    range 1000 600000
-    default 10000
+    int "Additional delay between fragment uplinks (ms)"
+    range 0 600000
+    default 0
     help
-        This is an additional application-side throttle. RadioLib LoRaWAN duty
-        cycle handling remains enabled and is the authoritative regulatory gate.
+        Optional application-side throttle in addition to LoRaWAN timing. The
+        maximum-throughput default is zero. RadioLib duty-cycle handling remains
+        enabled and is always the authoritative regulatory gate.
 
 config OBU_LORAWAN_JOIN_RETRY_MS
     int "Delay after an actual OTAA failure (ms)"
